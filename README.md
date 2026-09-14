@@ -9,7 +9,9 @@ screencasts, live demos, teaching, and accessibility use cases.
 ### Overlay demo
 
 <p align="center">
-https://github.com/user-attachments/assets/64381595-3775-4ff8-8a2c-d0ed37d96c66
+
+https://github.com/user-attachments/assets/706e3535-3bbf-4c08-8825-b30495120a58
+
 </p>
 
 ## Features
