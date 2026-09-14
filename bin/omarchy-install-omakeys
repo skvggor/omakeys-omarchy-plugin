@@ -58,22 +58,27 @@ run_as_root() {
 }
 
 resolve_version() {
-  local version="$OMAKEYS_VERSION"
+  local version="${OMAKEYS_VERSION:-}"
   if [[ -z "$version" ]]; then
-    # Prefer the source of truth: manifest.json in the plugin directory.
     if command -v jq >/dev/null 2>&1 && [[ -f "$PROJECT_DIR/manifest.json" ]]; then
-      version="v$(jq -r '.version' "$PROJECT_DIR/manifest.json")"
+      local parsed_version
+      parsed_version="$(jq -r '.version // empty' "$PROJECT_DIR/manifest.json")"
+      if [[ -n "$parsed_version" && "$parsed_version" != "null" ]]; then
+        version="v$parsed_version"
+      fi
     fi
   fi
-  # Fallback: resolve the latest tag via the GitHub redirect.
+
   if [[ -z "$version" ]]; then
-    version="$(curl --fail --location --silent --show-error --connect-timeout 10 \
+    version="$(curl --fail --silent --show-error --connect-timeout 10 \
       --max-time 20 --head \
       "https://github.com/$REPO/releases/latest" \
-      | sed -n 's/^location: .*\/tag\/\(v[0-9][0-9.]*\)/\1/Ip' \
+      | grep -i '^location:' \
+      | sed -n 's/.*\/tag\/\(v[0-9a-zA-Z.-]*\).*/\1/p' \
       | tr -d '\r' \
-      | head -n 1)"
+      | head -n 1 || true)"
   fi
+
   [[ -n "$version" ]] || fail "could not resolve version (set OMAKEYS_VERSION or install jq)"
   echo "$version"
 }
@@ -84,7 +89,6 @@ verify_attestation() {
   attestation_file="$(mktemp)"
   trap "rm -f '$attestation_file'" RETURN
 
-  # Hard ceilings: 5s connect, 20s total, 1MiB response.
   local curl_opts=(--fail --location --retry 4 --retry-delay 2
     --connect-timeout 5 --max-time 20 --max-filesize 1048576
     --silent --show-error)
@@ -96,12 +100,11 @@ verify_attestation() {
     -o "$attestation_file" \
     || return 1
 
-  # The repository URI lives inside the base64 DSSE payload -- the part the
-  # envelope actually signs -- not in the surrounding metadata.
   jq -e '.attestations[0].bundle.dsseEnvelope.payload
     | @base64d
-    | test("https://github\\.com/'"$REPO"'")
-    and test("https://slsa\\.dev/provenance")' \
+    | fromjson
+    | select(.predicateType == "https://slsa.dev/provenance/v1")
+    | .predicate.buildDefinition.externalParameters.workflow.repository == "https://github.com/'"$REPO"'"' \
     "$attestation_file" >/dev/null 2>&1 \
     || return 1
 
@@ -122,7 +125,6 @@ fetch_release() {
   local base="$RELEASES_URL/$version"
   asset_dir="$(mktemp -d)"
 
-  # Hard ceilings so a stalled/oversized response cannot hang setup or fill disk.
   local curl_opts=(--fail --location --retry 3 --retry-delay 2
     --connect-timeout 10 --max-time 60 --max-filesize 10485760
     --silent --show-error)
@@ -144,12 +146,12 @@ fetch_release() {
   or verify manually with: gh attestation verify $asset_dir/$HELPER_ASSET --owner $REPO"
   fi
 
-  cp "$asset_dir/$HELPER_ASSET" "$DAEMON"
-  chmod +x "$DAEMON"
-  echo "OmaKeys daemon $version installed at $DAEMON"
+  run_as_root install -m 2755 -o root -g input "$asset_dir/$HELPER_ASSET" "$DAEMON"
+  echo "OmaKeys daemon $version installed and setgid configured at $DAEMON"
 }
 
 build_daemon() {
+  local mode="${1:-}"
   if ! command -v cargo >/dev/null 2>&1; then
     fail "cargo not found. Install Rust first or use --install for the prebuilt release binary."
   fi
@@ -158,23 +160,15 @@ build_daemon() {
     cargo build --release --bin omakeys-daemon
   )
   local built="$PROJECT_DIR/target/release/omakeys-daemon"
-  if [[ -e "$DAEMON" && "$(stat -c '%U' "$DAEMON")" == "root" ]]; then
+
+  if [[ "$mode" == "setgid" ]]; then
     run_as_root install -m 2755 -o root -g input "$built" "$DAEMON"
+    echo "daemon built and installed at $DAEMON (setgid root:input)"
   else
     cp "$built" "$DAEMON"
     chmod +x "$DAEMON"
+    echo "daemon built and installed at $DAEMON (local permissions)"
   fi
-  echo "daemon built and installed at $DAEMON"
-}
-
-apply_setgid() {
-  if [[ "$(stat -c '%U' "$DAEMON")" != "root" || "$(stat -c '%G' "$DAEMON")" != "input" || ! -g "$DAEMON" ]]; then
-    if [[ "$(stat -c '%U' "$DAEMON")" != "root" ]]; then
-      run_as_root chown root:input "$DAEMON"
-    fi
-    run_as_root chmod 2755 "$DAEMON"
-  fi
-  echo "setgid group:$(stat -c '%G' "$DAEMON") mode:$(stat -c '%a' "$DAEMON") (works without re-login)"
 }
 
 add_to_input_group() {
@@ -211,18 +205,11 @@ do_check() {
 case "${1:-}" in
   --check) do_check ;;
   --build) build_daemon ;;
-  --build-install)
-    build_daemon
-    apply_setgid
-    ;;
-  --install)
-    fetch_release
-    apply_setgid
-    ;;
+  --build-install) build_daemon "setgid" ;;
+  --install) fetch_release ;;
   --uninstall) uninstall_daemon ;;
   --usermod)
     fetch_release
-    apply_setgid
     add_to_input_group
     ;;
   -h | --help)
