@@ -1,0 +1,233 @@
+#!/usr/bin/env bash
+# omarchy:summary=Install the OmaKeys daemon (from the latest GitHub release or a local build) and grant input-group access (no re-login)
+# omarchy:requires-sudo=true
+
+set -euo pipefail
+
+if (( EUID == 0 )); then
+  export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+DAEMON="$SCRIPT_DIR/omakeys-daemon"
+REPO="skvggor/omakeys-omarchy-plugin"
+RELEASES_URL="https://github.com/$REPO/releases/download"
+ATTESTATIONS_API="https://api.github.com/repos/$REPO/attestations"
+HELPER_ASSET="omakeys-daemon-x86_64-linux-gnu"
+asset_dir=""
+
+fail() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+cleanup() {
+  [[ -n "$asset_dir" ]] && rm -rf "$asset_dir"
+}
+
+trap cleanup EXIT
+
+usage() {
+  echo "Usage: $(basename "$0") [--check|--build|--build-install|--install|--uninstall|--usermod]" >&2
+  echo "  --check          Report daemon readiness and setgid status" >&2
+  echo "  --build          Compile the daemon locally with cargo (developers only, no sudo)" >&2
+  echo "  --build-install  Compile locally and setgid it to group 'input' (developers, sudo)" >&2
+  echo "  --install        Download the daemon from the latest GitHub release and setgid it (sudo, no Rust needed)" >&2
+  echo "  --uninstall      Remove the setgid daemon binary (sudo)" >&2
+  echo "  --usermod        Install from release and add the current user to the 'input' group (next login)" >&2
+  echo "  -h, --help       Show this help" >&2
+  echo "Environment:" >&2
+  echo "  OMAKEYS_VERSION  Release tag to download, e.g. v1.0.0 (default: reads manifest.json)" >&2
+  # omarchy:flag-requires-sudo=true
+  exit 1
+}
+
+run_as_root() {
+  local command_name="$1"
+  shift
+  if (( EUID == 0 )); then
+    "$command_name" "$@"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo "$command_name" "$@"
+  elif command -v pkexec >/dev/null 2>&1; then
+    pkexec "$command_name" "$@"
+  else
+    fail "need root (no sudo or pkexec available): $command_name $*"
+  fi
+}
+
+resolve_version() {
+  local version="$OMAKEYS_VERSION"
+  if [[ -z "$version" ]]; then
+    # Prefer the source of truth: manifest.json in the plugin directory.
+    if command -v jq >/dev/null 2>&1 && [[ -f "$PROJECT_DIR/manifest.json" ]]; then
+      version="v$(jq -r '.version' "$PROJECT_DIR/manifest.json")"
+    fi
+  fi
+  # Fallback: resolve the latest tag via the GitHub redirect.
+  if [[ -z "$version" ]]; then
+    version="$(curl --fail --location --silent --show-error --connect-timeout 10 \
+      --max-time 20 --head \
+      "https://github.com/$REPO/releases/latest" \
+      | sed -n 's/^location: .*\/tag\/\(v[0-9][0-9.]*\)/\1/Ip' \
+      | tr -d '\r' \
+      | head -n 1)"
+  fi
+  [[ -n "$version" ]] || fail "could not resolve version (set OMAKEYS_VERSION or install jq)"
+  echo "$version"
+}
+
+verify_attestation() {
+  local binary_sha256="$1"
+  local attestation_file
+  attestation_file="$(mktemp)"
+  trap "rm -f '$attestation_file'" RETURN
+
+  # Hard ceilings: 5s connect, 20s total, 1MiB response.
+  local curl_opts=(--fail --location --retry 4 --retry-delay 2
+    --connect-timeout 5 --max-time 20 --max-filesize 1048576
+    --silent --show-error)
+
+  curl "${curl_opts[@]}" \
+    -H "Accept: application/vnd.github+json" \
+    -H "User-Agent: omakeys-installer" \
+    "$ATTESTATIONS_API/sha256:$binary_sha256" \
+    -o "$attestation_file" \
+    || return 1
+
+  # The repository URI lives inside the base64 DSSE payload -- the part the
+  # envelope actually signs -- not in the surrounding metadata.
+  jq -e '.attestations[0].bundle.dsseEnvelope.payload
+    | @base64d
+    | test("https://github\\.com/'"$REPO"'")
+    and test("https://slsa\\.dev/provenance")' \
+    "$attestation_file" >/dev/null 2>&1 \
+    || return 1
+
+  echo "Build attestation verified (GitHub-signed provenance)"
+  return 0
+}
+
+fetch_release() {
+  command -v jq  >/dev/null 2>&1 || fail "jq is required (omarchy pkg add jq)"
+  command -v curl >/dev/null 2>&1 || fail "curl is required (omarchy pkg add curl)"
+
+  if [[ "$(uname -m)" != "x86_64" ]]; then
+    fail "no prebuilt daemon for $(uname -m); build it from source with --build (omarchy pkg add rust)"
+  fi
+
+  local version
+  version="$(resolve_version)"
+  local base="$RELEASES_URL/$version"
+  asset_dir="$(mktemp -d)"
+
+  # Hard ceilings so a stalled/oversized response cannot hang setup or fill disk.
+  local curl_opts=(--fail --location --retry 3 --retry-delay 2
+    --connect-timeout 10 --max-time 60 --max-filesize 10485760
+    --silent --show-error)
+
+  curl "${curl_opts[@]}" "$base/$HELPER_ASSET"       -o "$asset_dir/$HELPER_ASSET" \
+    || fail "could not download $HELPER_ASSET $version -- no release yet? Build from source with --build"
+  curl "${curl_opts[@]}" "$base/$HELPER_ASSET.sha256" -o "$asset_dir/$HELPER_ASSET.sha256" \
+    || fail "could not download checksum for $HELPER_ASSET $version"
+
+  (cd "$asset_dir" && sha256sum --check --status "$HELPER_ASSET.sha256") \
+    || fail "checksum mismatch for $HELPER_ASSET $version; refusing to install it"
+
+  local binary_sha256
+  binary_sha256="$(sha256sum "$asset_dir/$HELPER_ASSET" | cut -d' ' -f1)"
+
+  if ! verify_attestation "$binary_sha256"; then
+    fail "attestation verification failed for $HELPER_ASSET $version; refusing to install it.
+  Check your network (the GitHub API rate-limits unauthenticated requests) and retry,
+  or verify manually with: gh attestation verify $asset_dir/$HELPER_ASSET --owner $REPO"
+  fi
+
+  cp "$asset_dir/$HELPER_ASSET" "$DAEMON"
+  chmod +x "$DAEMON"
+  echo "OmaKeys daemon $version installed at $DAEMON"
+}
+
+build_daemon() {
+  if ! command -v cargo >/dev/null 2>&1; then
+    fail "cargo not found. Install Rust first or use --install for the prebuilt release binary."
+  fi
+  (
+    cd "$PROJECT_DIR"
+    cargo build --release --bin omakeys-daemon
+  )
+  local built="$PROJECT_DIR/target/release/omakeys-daemon"
+  if [[ -e "$DAEMON" && "$(stat -c '%U' "$DAEMON")" == "root" ]]; then
+    run_as_root install -m 2755 -o root -g input "$built" "$DAEMON"
+  else
+    cp "$built" "$DAEMON"
+    chmod +x "$DAEMON"
+  fi
+  echo "daemon built and installed at $DAEMON"
+}
+
+apply_setgid() {
+  if [[ "$(stat -c '%U' "$DAEMON")" != "root" || "$(stat -c '%G' "$DAEMON")" != "input" || ! -g "$DAEMON" ]]; then
+    if [[ "$(stat -c '%U' "$DAEMON")" != "root" ]]; then
+      run_as_root chown root:input "$DAEMON"
+    fi
+    run_as_root chmod 2755 "$DAEMON"
+  fi
+  echo "setgid group:$(stat -c '%G' "$DAEMON") mode:$(stat -c '%a' "$DAEMON") (works without re-login)"
+}
+
+add_to_input_group() {
+  if id -nG | tr ' ' '\n' | grep -qx "input"; then
+    echo "user is already in the input group"
+    return 0
+  fi
+  run_as_root usermod -aG input "$(id -un)"
+  echo "Membership is only active after the next login"
+}
+
+uninstall_daemon() {
+  if [[ ! -e "$DAEMON" ]]; then
+    echo "daemon: not installed; nothing to remove"
+    return 0
+  fi
+  run_as_root rm -f "$DAEMON"
+  echo "daemon removed"
+}
+
+do_check() {
+  if [[ ! -x "$DAEMON" ]]; then
+    echo "daemon: NOT installed; run with --install (release binary) or --build (local build)"
+  else
+    echo "daemon: present ($(stat -c '%s bytes' "$DAEMON"))"
+  fi
+  if [[ -g "$DAEMON" ]] && [[ "$(stat -c '%G' "$DAEMON")" == "input" ]]; then
+    echo "setgid: active (group input, no re-login required)"
+  else
+    echo "setgid: NOT active; run --install once with sudo so evdev capture works"
+  fi
+}
+
+case "${1:-}" in
+  --check) do_check ;;
+  --build) build_daemon ;;
+  --build-install)
+    build_daemon
+    apply_setgid
+    ;;
+  --install)
+    fetch_release
+    apply_setgid
+    ;;
+  --uninstall) uninstall_daemon ;;
+  --usermod)
+    fetch_release
+    apply_setgid
+    add_to_input_group
+    ;;
+  -h | --help)
+    usage
+    exit 0
+    ;;
+  *) usage ;;
+esac

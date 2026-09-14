@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  # CI only reads the repository; the Release workflow holds separate
+  # permissions scoped to that job.
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable
+
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build and test the Rust daemon
+        run: cargo test --all-targets
+
+      - name: Test the QML model logic
+        run: npm test

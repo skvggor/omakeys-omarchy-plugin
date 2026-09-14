@@ -1,0 +1,10 @@
+# Build artifacts
+target/
+*.png.bak
+
+# Daemon binary is built by the install helper
+bin/omakeys-daemon
+
+# Editor and OS noise
+*.swp
+.DS_Store

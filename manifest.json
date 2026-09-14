@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "id": "skvggor.omakeys",
+  "name": "OmaKeys",
+  "version": "1.0.0",
+  "author": "skvggor",
+  "license": "MIT",
+  "description": "Shows the keys you press and the mouse buttons you click as a floating on-screen overlay plus a bar indicator. Made for screencasts, live demos, and teaching.",
+  "kinds": ["service", "bar-widget", "panel"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml",
+    "panel": "Overlay.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaKeys",
+    "description": "Floating key display + bar indicator driven by an evdev daemon",
+    "category": "Input",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "overlayEnabled": true,
+      "showMouse": true,
+      "overlayVerticalPercent": 62,
+      "maxKeys": 6
+    },
+    "schema": [
+      {
+        "key": "overlayEnabled",
+        "type": "boolean",
+        "label": "Floating overlay",
+        "description": "Display the keys you press as a floating overlay on the focused monitor.",
+        "defaultValue": true
+      },
+      {
+        "key": "showMouse",
+        "type": "boolean",
+        "label": "Show mouse clicks",
+        "description": "Surface mouse button clicks and scrolling on the overlay.",
+        "defaultValue": true
+      },
+      {
+        "key": "overlayVerticalPercent",
+        "type": "integer",
+        "label": "Overlay vertical position (%)",
+        "description": "How far down the screen the overlay sits. 50 is the center.",
+        "min": 10,
+        "max": 90,
+        "step": 1,
+        "defaultValue": 62
+      },
+      {
+        "key": "maxKeys",
+        "type": "integer",
+        "label": "Max visible keys",
+        "description": "How many recent key entries the overlay keeps at once.",
+        "min": 1,
+        "max": 12,
+        "step": 1,
+        "defaultValue": 6
+      }
+    ]
+  }
+}
