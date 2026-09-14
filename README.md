@@ -6,6 +6,12 @@ A floating on-screen overlay that shows the keys you press and the mouse
 buttons you click, plus a small indicator in the Omarchy bar. Built for
 screencasts, live demos, teaching, and accessibility use cases.
 
+### Overlay demo
+
+<p align="center">
+https://github.com/user-attachments/assets/64381595-3775-4ff8-8a2c-d0ed37d96c66
+</p>
+
 ## Features
 
 - Per-monitor floating overlay showing the current key combo (modifiers first).
