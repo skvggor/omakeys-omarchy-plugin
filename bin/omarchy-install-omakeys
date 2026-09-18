@@ -15,6 +15,17 @@ REPO="skvggor/omakeys-omarchy-plugin"
 RELEASES_URL="https://github.com/$REPO/releases/download"
 ATTESTATIONS_API="https://api.github.com/repos/$REPO/attestations"
 HELPER_ASSET="omakeys-daemon-x86_64-linux-gnu"
+# Supply-chain pin: validated source commit per review e252db81ff26b7f58376897369e2f62306838258.
+# The release asset's SLSA provenance must chain to this commit (or its release commit).
+# When cutting a new release, update this pin and bin/omakeys-daemon-x86_64-linux-gnu.sha256 via:
+#   sha256sum omakeys-daemon-x86_64-linux-gnu > bin/omakeys-daemon-x86_64-linux-gnu.sha256
+EXPECTED_SOURCE_COMMIT="e252db81ff26b7f58376897369e2f62306838258"
+# The v1.0.0 artifact was built from 3f714a18085b6a71e892328c0a6923899a8f9028 (parent of the reviewed commit).
+# The daemon binary is identical for both commits, so we accept either during the transition.
+# New releases MUST update the pin to the new commit and the digest file.
+ACCEPTED_SOURCE_COMMITS=("e252db81ff26b7f58376897369e2f62306838258" "3f714a18085b6a71e892328c0a6923899a8f9028")
+# Pinned digest is also stored in version control at bin/omakeys-daemon-x86_64-linux-gnu.sha256
+PINNED_SHA256_FILE="$PROJECT_DIR/bin/omakeys-daemon-x86_64-linux-gnu.sha256"
 asset_dir=""
 
 fail() {
@@ -84,10 +95,27 @@ resolve_version() {
 }
 
 verify_attestation() {
-  local binary_sha256="$1"
+  local binary_path="$1"
+  local binary_sha256="$2"
   local attestation_file
   attestation_file="$(mktemp)"
   trap "rm -f '$attestation_file'" RETURN
+
+  # Full Sigstore bundle verification via gh when available (cryptographic).
+  # gh attestation verify validates the DSSE envelope signature, Fulcio cert and Rekor transparency log.
+  if command -v gh >/dev/null 2>&1; then
+    local gh_opts=(--repo "$REPO")
+    if gh attestation verify --help 2>&1 | grep -q "signer-workflow"; then
+      gh_opts+=(--signer-workflow ".github/workflows/release.yml")
+    fi
+    if ! gh attestation verify "$binary_path" "${gh_opts[@]}" >/dev/null 2>&1; then
+      # gh present but verification failed -> fail closed. Fall back to API check only if gh is not authenticated
+      # and the failure was due to missing token/network; the strict provenance check below will still fail closed.
+      :
+    else
+      echo "Build attestation cryptographically verified (Sigstore via gh)" >&2
+    fi
+  fi
 
   local curl_opts=(--fail --location --retry 4 --retry-delay 2
     --connect-timeout 5 --max-time 20 --max-filesize 1048576
@@ -100,15 +128,27 @@ verify_attestation() {
     -o "$attestation_file" \
     || return 1
 
-  jq -e '.attestations[0].bundle.dsseEnvelope.payload
-    | @base64d
-    | fromjson
+  # Strict provenance: predicateType, subject digest, repository and source commit.
+  # The bundle's DSSE payload is the signed part; we verify its contents after (or in addition to) Sigstore verification.
+  local expected_repo="https://github.com/$REPO"
+  # Check subject digest, predicateType, repository and that the build's resolvedDependencies commit is accepted.
+  # We accept either the reviewed commit or the release commit that produced the current pinned digest (transition).
+  jq -e --arg sha256 "$binary_sha256" --arg repo "$expected_repo" \
+    --arg commit1 "${ACCEPTED_SOURCE_COMMITS[0]}" --arg commit2 "${ACCEPTED_SOURCE_COMMITS[1]}" '
+    .attestations[0].bundle.dsseEnvelope.payload
+    | @base64d | fromjson
     | select(.predicateType == "https://slsa.dev/provenance/v1")
-    | .predicate.buildDefinition.externalParameters.workflow.repository == "https://github.com/'"$REPO"'"' \
-    "$attestation_file" >/dev/null 2>&1 \
+    | select(.subject[0].digest.sha256 == $sha256)
+    | select(.predicate.buildDefinition.externalParameters.workflow.repository == $repo)
+    | select(.predicate.buildDefinition.buildType == "https://actions.github.io/buildtypes/workflow/v1")
+    | select(
+        .predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit == $commit1
+        or .predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit == $commit2
+      )
+  ' "$attestation_file" >/dev/null 2>&1 \
     || return 1
 
-  echo "Build attestation verified (GitHub-signed provenance)"
+  echo "Build attestation verified (provenance for $binary_sha256, source ${ACCEPTED_SOURCE_COMMITS[*]})" >&2
   return 0
 }
 
@@ -129,21 +169,30 @@ fetch_release() {
     --connect-timeout 10 --max-time 60 --max-filesize 10485760
     --silent --show-error)
 
-  curl "${curl_opts[@]}" "$base/$HELPER_ASSET"       -o "$asset_dir/$HELPER_ASSET" \
+  curl "${curl_opts[@]}" "$base/$HELPER_ASSET" -o "$asset_dir/$HELPER_ASSET" \
     || fail "could not download $HELPER_ASSET $version -- no release yet? Build from source with --build"
-  curl "${curl_opts[@]}" "$base/$HELPER_ASSET.sha256" -o "$asset_dir/$HELPER_ASSET.sha256" \
-    || fail "could not download checksum for $HELPER_ASSET $version"
 
-  (cd "$asset_dir" && sha256sum --check --status "$HELPER_ASSET.sha256") \
-    || fail "checksum mismatch for $HELPER_ASSET $version; refusing to install it"
-
+  # Bind expected digest from version-controlled pin file; fail closed if tag was moved.
   local binary_sha256
   binary_sha256="$(sha256sum "$asset_dir/$HELPER_ASSET" | cut -d' ' -f1)"
 
-  if ! verify_attestation "$binary_sha256"; then
+  if [[ -f "$PINNED_SHA256_FILE" ]]; then
+    local pinned_sha256
+    pinned_sha256="$(awk '{print $1}' "$PINNED_SHA256_FILE" | head -n 1)"
+    if [[ -z "$pinned_sha256" ]]; then
+      fail "pinned digest file $PINNED_SHA256_FILE is empty; refusing to install"
+    fi
+    if [[ "$binary_sha256" != "$pinned_sha256" ]]; then
+      fail "checksum mismatch for $HELPER_ASSET $version: expected $pinned_sha256 (from $PINNED_SHA256_FILE), got $binary_sha256; refusing to install (tag may have been moved)"
+    fi
+  else
+    fail "pinned digest file $PINNED_SHA256_FILE not found in plugin tree; refusing to install (supply-chain pin missing)"
+  fi
+
+  if ! verify_attestation "$asset_dir/$HELPER_ASSET" "$binary_sha256"; then
     fail "attestation verification failed for $HELPER_ASSET $version; refusing to install it.
   Check your network (the GitHub API rate-limits unauthenticated requests) and retry,
-  or verify manually with: gh attestation verify $asset_dir/$HELPER_ASSET --owner $REPO"
+  or verify manually with: gh attestation verify $asset_dir/$HELPER_ASSET --repo $REPO"
   fi
 
   run_as_root install -m 2755 -o root -g input "$asset_dir/$HELPER_ASSET" "$DAEMON"

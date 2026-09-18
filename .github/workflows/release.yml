@@ -106,8 +106,18 @@ jobs:
             "https://api.github.com/repos/skvggor/omakeys-omarchy-plugin/attestations/$digest" \
             -o "$attestation_file"
 
-          jq -e '.attestations[0].bundle.dsseEnvelope.payload
-            | @base64d
-            | test("https://github\\.com/skvggor/omakeys-omarchy-plugin")
-            and test("https://slsa\\.dev/provenance")' "$attestation_file" >/dev/null
-          echo "attestation served: $digest"
+          # Strict provenance check mirrors the installer's verify_attestation():
+          # predicateType, subject digest, repository, buildType and source commit must all match.
+          sha256="${digest#sha256:}"
+          expected_repo="https://github.com/skvggor/omakeys-omarchy-plugin"
+          expected_commit="$(git rev-parse HEAD)"
+          jq -e --arg sha256 "$sha256" --arg repo "$expected_repo" --arg commit "$expected_commit" '
+            .attestations[0].bundle.dsseEnvelope.payload
+            | @base64d | fromjson
+            | select(.predicateType == "https://slsa.dev/provenance/v1")
+            | select(.subject[0].digest.sha256 == $sha256)
+            | select(.predicate.buildDefinition.externalParameters.workflow.repository == $repo)
+            | select(.predicate.buildDefinition.buildType == "https://actions.github.io/buildtypes/workflow/v1")
+            | select(.predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit == $commit)
+          ' "$attestation_file" >/dev/null
+          echo "attestation served: $digest (provenance for $expected_commit)"
