@@ -15,6 +15,9 @@ REPO="skvggor/omakeys-omarchy-plugin"
 RELEASES_URL="https://github.com/$REPO/releases/download"
 ATTESTATIONS_API="https://api.github.com/repos/$REPO/attestations"
 HELPER_ASSET="omakeys-daemon-x86_64-linux-gnu"
+PINNED_VERSION="v1.0.0"
+PINNED_SHA256="5aa5484fb7c556f2461177286040c0200a708c84e965382184f97eafef885f8b"
+PINNED_COMMIT="e252db81ff26b7f58376897369e2f62306838258"
 asset_dir=""
 
 fail() {
@@ -84,7 +87,10 @@ resolve_version() {
 }
 
 verify_attestation() {
-  local binary_sha256="$1"
+  local binary_path="$1"
+  local binary_sha256="$2"
+  local expected_commit="${3:-}"
+  local version="${4:-}"
   local attestation_file
   attestation_file="$(mktemp)"
   trap "rm -f '$attestation_file'" RETURN
@@ -100,15 +106,52 @@ verify_attestation() {
     -o "$attestation_file" \
     || return 1
 
-  jq -e '.attestations[0].bundle.dsseEnvelope.payload
-    | @base64d
-    | fromjson
-    | select(.predicateType == "https://slsa.dev/provenance/v1")
-    | .predicate.buildDefinition.externalParameters.workflow.repository == "https://github.com/'"$REPO"'"' \
-    "$attestation_file" >/dev/null 2>&1 \
-    || return 1
+  local jq_filter
+  if [[ -n "$expected_commit" && -n "$version" ]]; then
+    jq_filter='.attestations
+      | map(.bundle.dsseEnvelope.payload | @base64d | fromjson)
+      | map(select(
+          .predicateType == "https://slsa.dev/provenance/v1"
+          and .predicate.buildDefinition.externalParameters.workflow.repository == "https://github.com/'"$REPO"'" 
+          and .predicate.buildDefinition.externalParameters.workflow.ref == "refs/tags/'"$version"'" 
+          and .subject[0].digest.sha256 == "'"$binary_sha256"'"
+          and .predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit == "'"$expected_commit"'"
+        ))
+      | length > 0'
+  else
+    jq_filter='.attestations
+      | map(.bundle.dsseEnvelope.payload | @base64d | fromjson)
+      | map(select(
+          .predicateType == "https://slsa.dev/provenance/v1"
+          and .predicate.buildDefinition.externalParameters.workflow.repository == "https://github.com/'"$REPO"'" 
+          and .subject[0].digest.sha256 == "'"$binary_sha256"'"
+        ))
+      | length > 0'
+  fi
 
-  echo "Build attestation verified (GitHub-signed provenance)"
+  if ! jq -e "$jq_filter" "$attestation_file" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  if command -v gh >/dev/null 2>&1; then
+    if gh attestation verify "$binary_path" --owner "${REPO%/*}" >/dev/null 2>&1; then
+      echo "Build attestation verified (GitHub-signed provenance, Sigstore)"
+      return 0
+    fi
+    if gh attestation verify "$binary_path" --repo "$REPO" >/dev/null 2>&1; then
+      echo "Build attestation verified (GitHub-signed provenance, Sigstore)"
+      return 0
+    fi
+    return 1
+  fi
+
+  if [[ -n "$expected_commit" ]]; then
+    echo "error: gh is required for cryptographic attestation verification of pinned commit $expected_commit" >&2
+    echo "Install gh (https://cli.github.com) or build locally with --build-install" >&2
+    return 1
+  fi
+
+  echo "Build attestation verified (payload checks, install gh for full Sigstore verification)"
   return 0
 }
 
@@ -131,19 +174,40 @@ fetch_release() {
 
   curl "${curl_opts[@]}" "$base/$HELPER_ASSET"       -o "$asset_dir/$HELPER_ASSET" \
     || fail "could not download $HELPER_ASSET $version -- no release yet? Build from source with --build"
-  curl "${curl_opts[@]}" "$base/$HELPER_ASSET.sha256" -o "$asset_dir/$HELPER_ASSET.sha256" \
-    || fail "could not download checksum for $HELPER_ASSET $version"
-
-  (cd "$asset_dir" && sha256sum --check --status "$HELPER_ASSET.sha256") \
-    || fail "checksum mismatch for $HELPER_ASSET $version; refusing to install it"
 
   local binary_sha256
   binary_sha256="$(sha256sum "$asset_dir/$HELPER_ASSET" | cut -d' ' -f1)"
 
-  if ! verify_attestation "$binary_sha256"; then
+  local expected_sha256=""
+  local expected_commit=""
+  if [[ "$version" == "$PINNED_VERSION" ]]; then
+    expected_sha256="$PINNED_SHA256"
+    expected_commit="$PINNED_COMMIT"
+    if [[ -f "$PROJECT_DIR/bin/omakeys-daemon-$PINNED_VERSION.sha256" ]]; then
+      local pinned_file_sha
+      pinned_file_sha="$(cut -d' ' -f1 < "$PROJECT_DIR/bin/omakeys-daemon-$PINNED_VERSION.sha256" | tr -d '[:space:]')"
+      if [[ -n "$pinned_file_sha" && "$pinned_file_sha" != "$PINNED_SHA256" ]]; then
+        fail "pinned SHA mismatch between installer and checksum file"
+      fi
+    fi
+    if [[ "$binary_sha256" != "$expected_sha256" ]]; then
+      fail "checksum mismatch for $HELPER_ASSET $version: expected $expected_sha256, got $binary_sha256; refusing to install (tag may have been moved or asset replaced)"
+    fi
+  else
+    curl "${curl_opts[@]}" "$base/$HELPER_ASSET.sha256" -o "$asset_dir/$HELPER_ASSET.sha256" \
+      || fail "could not download checksum for $HELPER_ASSET $version"
+    if ! (cd "$asset_dir" && sha256sum --check --status "$HELPER_ASSET.sha256"); then
+      fail "checksum mismatch for $HELPER_ASSET $version; refusing to install it"
+    fi
+    if [[ "$binary_sha256" != "$(cut -d' ' -f1 < "$asset_dir/$HELPER_ASSET.sha256" | tr -d '[:space:]')" ]]; then
+      fail "checksum mismatch for $HELPER_ASSET $version; refusing to install it"
+    fi
+  fi
+
+  if ! verify_attestation "$asset_dir/$HELPER_ASSET" "$binary_sha256" "$expected_commit" "$version"; then
     fail "attestation verification failed for $HELPER_ASSET $version; refusing to install it.
   Check your network (the GitHub API rate-limits unauthenticated requests) and retry,
-  or verify manually with: gh attestation verify $asset_dir/$HELPER_ASSET --owner $REPO"
+  or verify manually with: gh attestation verify $asset_dir/$HELPER_ASSET --owner ${REPO%/*}"
   fi
 
   run_as_root install -m 2755 -o root -g input "$asset_dir/$HELPER_ASSET" "$DAEMON"
