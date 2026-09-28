@@ -19,16 +19,22 @@ OIDC_ISSUER="https://token.actions.githubusercontent.com"
 RELEASES_URL="https://github.com/$REPO/releases/download"
 ATTESTATIONS_API="https://api.github.com/repos/$REPO/attestations"
 HELPER_ASSET="omakeys-daemon-x86_64-linux-gnu"
-# Supply-chain pin: validated source commit per review e252db81ff26b7f58376897369e2f62306838258.
-# The release asset's SLSA provenance must chain to this commit (or its release commit).
-# When cutting a new release, update this pin and bin/omakeys-daemon-x86_64-linux-gnu.sha256 via:
+# Supply-chain pin: an allowlist of immutable commits, not a reference to the
+# tip. The signed provenance must name one of these exact SHAs, so a build from
+# any other commit is rejected even when it is correctly signed and the owner
+# controls the tag, the asset and the published checksum. Each entry earns its
+# place:
+#   e252db81  the source commit reviewed by the marketplace maintainer
+#   3f714a1   the commit the published v1.0.0 asset was actually built from
+# src/ is byte-identical across the two (e252db81 only touched QML and docs),
+# so both resolve to the same daemon, and provenance is unforgeable, so neither
+# entry can be quietly repointed at different code.
+# Cutting a release takes a follow-up commit: the attestation names the tagged
+# commit and a tree cannot contain its own SHA, so the release commit is added
+# here in the next commit, together with the new pinned digest:
 #   sha256sum omakeys-daemon-x86_64-linux-gnu > bin/omakeys-daemon-x86_64-linux-gnu.sha256
-EXPECTED_SOURCE_COMMIT="e252db81ff26b7f58376897369e2f62306838258"
-# The v1.0.0 artifact was built from 3f714a18085b6a71e892328c0a6923899a8f9028 (parent of the reviewed commit).
-# The daemon binary is identical for both commits, so we accept either during the transition.
-# New releases MUST update the pin to the new commit and the digest file.
 ACCEPTED_SOURCE_COMMITS=("e252db81ff26b7f58376897369e2f62306838258" "3f714a18085b6a71e892328c0a6923899a8f9028")
-# Pinned digest is also stored in version control at bin/omakeys-daemon-x86_64-linux-gnu.sha256
+# Pinned digest of the release asset, in version control.
 PINNED_SHA256_FILE="$PROJECT_DIR/bin/omakeys-daemon-x86_64-linux-gnu.sha256"
 # Pinned Sigstore Fulcio CA chain: the trust anchor for the attestation certificate.
 FULCIO_CHAIN_FILE="$PROJECT_DIR/bin/sigstore-fulcio-chain.pem"
