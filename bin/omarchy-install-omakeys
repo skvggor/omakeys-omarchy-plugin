@@ -307,8 +307,36 @@ fetch_release() {
   source with --build-install"
   fi
 
-  run_as_root install -m 2755 -o root -g input "$asset_dir/$HELPER_ASSET" "$DAEMON"
+  install_verified_daemon "$asset_dir/$HELPER_ASSET" "$binary_sha256" \
+    || fail "refusing to keep an unverified daemon at $DAEMON"
   echo "OmaKeys daemon $version installed and setgid configured at $DAEMON"
+}
+
+# Privileged install guarded by a post-write digest check.
+#
+# The source file sits in a user-writable directory, and the privileged install
+# resolves that pathname itself, so between the moment its digest was verified
+# and the moment root opens it, another process running as the same user can
+# unlink and recreate it. The bytes that would then gain setgid input would not
+# be the bytes that were verified. Re-reading the digest of the installed file
+# closes that window: once install returns the file is root-owned, so a
+# mismatch means the substituted copy landed and it is removed before anything
+# can execute it. Failures are reported to the caller, which aborts.
+install_verified_daemon() {
+  local source_path="$1"
+  local expected_sha256="$2"
+
+  run_as_root install -m 2755 -o root -g input "$source_path" "$DAEMON" || return 1
+
+  local installed_sha256
+  installed_sha256="$(sha256sum "$DAEMON" 2>/dev/null | cut -d' ' -f1)" || installed_sha256=""
+  if [[ "$installed_sha256" != "$expected_sha256" ]]; then
+    run_as_root rm -f "$DAEMON" || true
+    echo "error: installed daemon does not match the verified digest" >&2
+    echo "  expected $expected_sha256, got ${installed_sha256:-unreadable}" >&2
+    return 1
+  fi
+  return 0
 }
 
 build_daemon() {
@@ -323,7 +351,12 @@ build_daemon() {
   local built="$PROJECT_DIR/target/release/omakeys-daemon"
 
   if [[ "$mode" == "setgid" ]]; then
-    run_as_root install -m 2755 -o root -g input "$built" "$DAEMON"
+    # target/release/ is user-writable too, so the built binary gets the same
+    # post-write check as the downloaded asset.
+    local built_sha256
+    built_sha256="$(sha256sum "$built" | cut -d' ' -f1)"
+    install_verified_daemon "$built" "$built_sha256" \
+      || fail "refusing to keep an unverified daemon at $DAEMON"
     echo "daemon built and installed at $DAEMON (setgid root:input)"
   else
     cp "$built" "$DAEMON"

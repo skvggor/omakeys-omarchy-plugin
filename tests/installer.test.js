@@ -335,6 +335,7 @@ function createSandbox(options = {}) {
     sudo: true,
     pkexec: false,
     cargo: false,
+    installSwap: false,
     groups: 'sys video',
     daemon: null,
     daemonGroup: 'users',
@@ -462,6 +463,11 @@ while [ $# -gt 0 ]; do
     *) if [ -z "$src" ]; then src="$1"; else dst="$1"; fi; shift ;;
   esac
 done
+# Simulates a process running as the same user replacing the source after it was
+# verified but before the privileged install opens it.
+if [ "$TEST_INSTALL_SWAP" = "1" ]; then
+  printf 'substituted after verification\\n' > "$src"
+fi
 mkdir -p "$(dirname "$dst")"
 cp "$src" "$dst"
 chmod "$mode" "$dst"
@@ -535,6 +541,7 @@ echo "locally built daemon" > target/release/omakeys-daemon
     CURL_ASSET_MODE: settings.assetCurl,
     CURL_ATTEST_MODE: settings.attestationsCurl,
     CURL_LATEST_MODE: settings.latestCurl,
+    TEST_INSTALL_SWAP: settings.installSwap ? '1' : '',
   }
   if (settings.version !== null) env.OMAKEYS_VERSION = settings.version
 
@@ -577,6 +584,25 @@ function assertInstallRefused(sandbox, pattern) {
 }
 
 test('bin/omarchy-install-omakeys', async (t) => {
+  await t.test('keeps the setgid daemon only when the installed bytes are the verified ones', { skip: skipReason }, () => {
+    const sandbox = createSandbox({ installSwap: true })
+    const result = sandbox.run(['--install'])
+
+    assert.equal(result.status, 1, result.stderr)
+    assert.match(result.stderr, /does not match the verified digest/)
+    assert.equal(fs.existsSync(sandbox.daemon), false, 'substituted daemon must be removed')
+    assert.match(sandbox.log('install.log'), /-m 2755 .* input/)
+  })
+
+  await t.test('drops a locally built daemon that was substituted before the setgid install', { skip: skipReason }, () => {
+    const sandbox = createSandbox({ cargo: true, installSwap: true })
+    const result = sandbox.run(['--build-install'])
+
+    assert.equal(result.status, 1, result.stderr)
+    assert.match(result.stderr, /does not match the verified digest/)
+    assert.equal(fs.existsSync(sandbox.daemon), false, 'substituted daemon must be removed')
+  })
+
   await t.test('installs the release daemon when the attestation verifies', { skip: skipReason }, () => {
     const sandbox = createSandbox()
     const result = sandbox.run(['--install'])

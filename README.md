@@ -182,6 +182,12 @@ bin/omakeys-daemon \
   network is unavailable. Manual re-check with the GitHub CLI (after
   `gh auth login`):
   `gh attestation verify <asset> --repo skvggor/omakeys-omarchy-plugin --signer-workflow skvggor/omakeys-omarchy-plugin/.github/workflows/release.yml`.
+- **Post-install re-check.** The verified file lives in a user-writable
+  directory and the privileged install resolves that path itself, so after
+  `install -m 2755` the installer re-reads the digest of the installed file and
+  removes it if it differs from the verified one. The bytes that end up setgid
+  `input` are therefore the bytes that were verified, even if another process
+  running as the same user substitutes the file mid-install.
 - **Owner-only state.** The keystroke state file and the single-instance lock
   are written with mode `0600`, and the enable flag directory is created with
   `umask 077`. The file lives at
