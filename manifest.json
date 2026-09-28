@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "skvggor.omakeys",
   "name": "OmaKeys",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "skvggor",
   "license": "GPL-3.0-or-later",
   "description": "Shows the keys you press and the mouse buttons you click as a floating on-screen overlay plus a bar indicator. Made for screencasts, live demos, and teaching.",
