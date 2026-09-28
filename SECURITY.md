@@ -40,6 +40,12 @@ installs nothing.
 `tests/installer.test.js` drives that same path against a throwaway CA, so the
 verification is covered by tests rather than by manual auditing.
 
+The `setgid input` bit is applied by a single privileged process that copies the
+verified asset into a private root-owned directory, checks the digest of that
+copy and installs from it. Anything running as your user can rewrite the
+download or the build output, but never the bytes that gain the bit, so a
+substituted daemon is rejected before an executable one exists.
+
 To re-check an already downloaded asset by hand, follow
 `verify_attestation()` in `bin/omarchy-install-omakeys`. `gh attestation
 verify --signer-workflow` does the same thing with the Sigstore Go client, if

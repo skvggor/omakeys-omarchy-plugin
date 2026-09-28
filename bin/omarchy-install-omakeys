@@ -38,6 +38,10 @@ ACCEPTED_SOURCE_COMMITS=("e252db81ff26b7f58376897369e2f62306838258" "3f714a18085
 PINNED_SHA256_FILE="$PROJECT_DIR/bin/omakeys-daemon-x86_64-linux-gnu.sha256"
 # Pinned Sigstore Fulcio CA chain: the trust anchor for the attestation certificate.
 FULCIO_CHAIN_FILE="$PROJECT_DIR/bin/sigstore-fulcio-chain.pem"
+# Where root stages the copy it verifies before giving it setgid. It must be a
+# directory root owns and no other user can write, so the staged copy cannot be
+# replaced after its digest is checked.
+STAGING_PARENT="/run/omakeys-install"
 asset_dir=""
 verify_dir=""
 
@@ -312,31 +316,56 @@ fetch_release() {
   echo "OmaKeys daemon $version installed and setgid configured at $DAEMON"
 }
 
-# Privileged install guarded by a post-write digest check.
+# Privileged install that only ever installs the bytes root itself verified.
 #
-# The source file sits in a user-writable directory, and the privileged install
-# resolves that pathname itself, so between the moment its digest was verified
-# and the moment root opens it, another process running as the same user can
-# unlink and recreate it. The bytes that would then gain setgid input would not
-# be the bytes that were verified. Re-reading the digest of the installed file
-# closes that window: once install returns the file is root-owned, so a
-# mismatch means the substituted copy landed and it is removed before anything
-# can execute it. Failures are reported to the caller, which aborts.
+# The source file sits in a user-writable directory and the caller runs as that
+# user, so any check performed outside the privileged step is advisory: between
+# the moment the digest was verified and the moment root opens the source,
+# another process running as the same user can unlink and recreate it. Verifying
+# again after the fact does not close that race either, because the setgid file
+# is already executable with group input while the check runs, which is exactly
+# the privilege the install hands out.
+#
+# So the copy, the check and the install all happen inside a single root
+# process, and the digest is taken from the copy rather than from the source:
+# a private copy in a fresh 0700 root-owned directory is immutable to the user,
+# so substitution before the copy is caught by the digest and substitution
+# after it is impossible. The digest of the installed file is re-read as well,
+# as a check against the destination path rather than the source.
 install_verified_daemon() {
   local source_path="$1"
   local expected_sha256="$2"
 
-  run_as_root install -m 2755 -o root -g input "$source_path" "$DAEMON" || return 1
+  run_as_root bash -c '
+set -euo pipefail
+source_path="$1"
+expected_sha256="$2"
+daemon_path="$3"
+staging_parent="$4"
 
-  local installed_sha256
-  installed_sha256="$(sha256sum "$DAEMON" 2>/dev/null | cut -d' ' -f1)" || installed_sha256=""
-  if [[ "$installed_sha256" != "$expected_sha256" ]]; then
-    run_as_root rm -f "$DAEMON" || true
-    echo "error: installed daemon does not match the verified digest" >&2
-    echo "  expected $expected_sha256, got ${installed_sha256:-unreadable}" >&2
-    return 1
-  fi
-  return 0
+staging_dir="$(mktemp -d "$staging_parent.XXXXXX")"
+trap "rm -rf -- \"$staging_dir\"" EXIT
+staged_daemon="$staging_dir/daemon"
+
+install -m 0600 -o root -g root -T "$source_path" "$staged_daemon"
+
+staged_sha256="$(sha256sum "$staged_daemon" | cut -d" " -f1)"
+if [ "$staged_sha256" != "$expected_sha256" ]; then
+  echo "error: the copy staged for install does not match the verified digest" >&2
+  echo "  expected $expected_sha256, got $staged_sha256" >&2
+  exit 1
+fi
+
+install -m 2755 -o root -g input -T "$staged_daemon" "$daemon_path"
+
+installed_sha256="$(sha256sum "$daemon_path" | cut -d" " -f1)"
+if [ "$installed_sha256" != "$expected_sha256" ]; then
+  rm -f -- "$daemon_path"
+  echo "error: installed daemon does not match the verified digest" >&2
+  echo "  expected $expected_sha256, got $installed_sha256" >&2
+  exit 1
+fi
+' bash "$source_path" "$expected_sha256" "$DAEMON" "$STAGING_PARENT"
 }
 
 build_daemon() {

@@ -369,9 +369,18 @@ function createSandbox(options = {}) {
     fs.symlinkSync(candidate, path.join(binDir, tool))
   }
   if (settings.openssl === 'present') fs.symlinkSync(OPENSSL, path.join(binDir, 'openssl'))
+  fs.symlinkSync(BASH, path.join(binDir, 'bash'))
 
   const script = path.join(scriptDir, 'omarchy-install-omakeys')
-  fs.copyFileSync(SCRIPT_PATH, script)
+  // The privileged step stages the copy it verifies under a root-owned parent;
+  // the sandbox redirects it into its own tree instead of /run.
+  const stagingParent = path.join(base, 'staging')
+  fs.writeFileSync(
+    script,
+    fs
+      .readFileSync(SCRIPT_PATH, 'utf8')
+      .replace(/^STAGING_PARENT=.*$/m, `STAGING_PARENT="${stagingParent}"`)
+  )
 
   if (settings.manifest) {
     fs.copyFileSync(path.join(PROJECT_ROOT, 'manifest.json'), path.join(pluginDir, 'manifest.json'))
@@ -460,11 +469,12 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -m) mode="$2"; shift 2 ;;
     -o|-g) shift 2 ;;
+    -T) shift ;;
     *) if [ -z "$src" ]; then src="$1"; else dst="$1"; fi; shift ;;
   esac
 done
 # Simulates a process running as the same user replacing the source after it was
-# verified but before the privileged install opens it.
+# verified but before the privileged step copies it into root-only storage.
 if [ "$TEST_INSTALL_SWAP" = "1" ]; then
   printf 'substituted after verification\\n' > "$src"
 fi
@@ -552,6 +562,7 @@ echo "locally built daemon" > target/release/omakeys-daemon
     script,
     daemon,
     logDir,
+    stagingParent,
     env,
     log(name) {
       const file = path.join(logDir, name)
@@ -584,14 +595,18 @@ function assertInstallRefused(sandbox, pattern) {
 }
 
 test('bin/omarchy-install-omakeys', async (t) => {
-  await t.test('keeps the setgid daemon only when the installed bytes are the verified ones', { skip: skipReason }, () => {
+  await t.test('never grants setgid input to a source substituted after verification', { skip: skipReason }, () => {
     const sandbox = createSandbox({ installSwap: true })
     const result = sandbox.run(['--install'])
 
     assert.equal(result.status, 1, result.stderr)
-    assert.match(result.stderr, /does not match the verified digest/)
-    assert.equal(fs.existsSync(sandbox.daemon), false, 'substituted daemon must be removed')
-    assert.match(sandbox.log('install.log'), /-m 2755 .* input/)
+    assert.match(result.stderr, /copy staged for install does not match the verified digest/)
+    assert.equal(fs.existsSync(sandbox.daemon), false, 'substituted daemon must never be installed')
+    assert.doesNotMatch(
+      sandbox.log('install.log'),
+      /-m 2755/,
+      'setgid install must not run once the staged copy fails verification'
+    )
   })
 
   await t.test('drops a locally built daemon that was substituted before the setgid install', { skip: skipReason }, () => {
@@ -599,8 +614,33 @@ test('bin/omarchy-install-omakeys', async (t) => {
     const result = sandbox.run(['--build-install'])
 
     assert.equal(result.status, 1, result.stderr)
-    assert.match(result.stderr, /does not match the verified digest/)
-    assert.equal(fs.existsSync(sandbox.daemon), false, 'substituted daemon must be removed')
+    assert.match(result.stderr, /copy staged for install does not match the verified digest/)
+    assert.equal(fs.existsSync(sandbox.daemon), false, 'substituted daemon must never be installed')
+    assert.doesNotMatch(sandbox.log('install.log'), /-m 2755/)
+  })
+
+  await t.test('installs setgid from the copy root verified, not from the source path', { skip: skipReason }, () => {
+    const sandbox = createSandbox()
+    const result = sandbox.run(['--install'])
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(fs.statSync(sandbox.daemon).mode & 0o7777, 0o2755)
+    const installLog = sandbox.log('install.log')
+    assert.match(installLog, /-m 0600 .*-T /, 'the source must be copied into root-only storage first')
+    assert.match(installLog, /-m 2755 .* input/)
+    assert.match(installLog, new RegExp(`-m 2755 .* ${sandbox.stagingParent.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
+  })
+
+  await t.test('removes the root-only staging copy after the install', { skip: skipReason }, () => {
+    const sandbox = createSandbox()
+    const result = sandbox.run(['--install'])
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.deepEqual(
+      fs.readdirSync(sandbox.base).filter((entry) => entry.startsWith('staging.')),
+      [],
+      'the staged copy must not outlive the install'
+    )
   })
 
   await t.test('installs the release daemon when the attestation verifies', { skip: skipReason }, () => {
