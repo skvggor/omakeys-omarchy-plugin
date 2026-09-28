@@ -12,7 +12,7 @@ const PROJECT_ROOT = path.join(__dirname, '..')
 const SCRIPT_PATH = path.join(PROJECT_ROOT, 'bin', 'omarchy-install-omakeys')
 const CHAIN_PATH = path.join(PROJECT_ROOT, 'bin', 'sigstore-fulcio-chain.pem')
 const PIN_PATH = path.join(PROJECT_ROOT, 'bin', 'omakeys-daemon-x86_64-linux-gnu.sha256')
-const FIXTURE_PATH = path.join(__dirname, 'fixtures', 'v1.0.0-attestation-bundle.json')
+const FIXTURE_PATH = path.join(__dirname, 'fixtures', 'v1.0.1-attestation-bundle.json')
 const SCRIPT_SOURCE = fs.readFileSync(SCRIPT_PATH, 'utf8')
 
 const REPO = SCRIPT_SOURCE.match(/^REPO="([^"]+)"$/m)[1]
@@ -29,7 +29,7 @@ const ASSET_NAME = 'omakeys-daemon-x86_64-linux-gnu'
 const ASSET_BYTES = Buffer.from('fake omakeys daemon binary\n')
 const ASSET_SHA256 = crypto.createHash('sha256').update(ASSET_BYTES).digest('hex')
 const KNOWN_COMMIT = 'a'.repeat(40)
-const SIGNER_SUBJECT = `URI:https://github.com/${REPO}/${SIGNER_WORKFLOW}@refs/tags/v1.0.0`
+const SIGNER_SUBJECT = `URI:https://github.com/${REPO}/${SIGNER_WORKFLOW}@refs/tags/v1.0.1`
 const TRACE_PATTERN = /^\++L(\d+):/
 const SYSTEM_ROOT_CERTIFICATE = findSystemRootCertificate()
 const REAL_TOOLS = [
@@ -339,7 +339,7 @@ function createSandbox(options = {}) {
     groups: 'sys video',
     daemon: null,
     daemonGroup: 'users',
-    version: 'v1.0.0',
+    version: 'v1.0.1',
     openssl: 'present',
     chain: 'matching',
     certificate: 'valid',
@@ -432,7 +432,7 @@ for arg in "$@"; do
 done
 if [ "$head_request" = "1" ] && [[ "$url" == *"/releases/latest"* ]]; then
   if [ "$CURL_LATEST_MODE" = "empty" ]; then exit 0; fi
-  echo "location: https://github.com/$TEST_REPO/releases/tag/v1.0.0"
+  echo "location: https://github.com/$TEST_REPO/releases/tag/v1.0.1"
   exit 0
 fi
 if [[ "$url" == *"/releases/download/"* ]]; then
@@ -793,7 +793,7 @@ test('bin/omarchy-install-omakeys', async (t) => {
 
     assert.equal(result.status, 0, result.stderr)
     assert.match(sandbox.log('curl.log'), /releases\/latest/)
-    assert.match(sandbox.log('curl.log'), /releases\/download\/v1\.0\.0/)
+    assert.match(sandbox.log('curl.log'), /releases\/download\/v1\.0\.1/)
   })
 
   await t.test('refuses when the version cannot be resolved', { skip: skipReason }, () => {
@@ -909,7 +909,7 @@ test('pinned Sigstore trust anchor', async (t) => {
   fs.writeFileSync(signaturePath, signature)
   fs.writeFileSync(messagePath, dsseMessage(fixture.dsseEnvelope.payloadType, payload.toString('utf8'), 'space'))
 
-  await t.test('chains the published v1.0.0 attestation to the pinned CA', { skip }, () => {
+  await t.test('chains the published v1.0.1 attestation to the pinned CA', { skip }, () => {
     runOpenssl(['x509', '-inform', 'der', '-in', certificatePath, '-out', certificatePem], directory)
     const verified = runOpenssl(
       ['verify', '-attime', integratedTime, '-trusted', CHAIN_PATH, '-no-CApath', '-no-CAfile', certificatePem],
