@@ -171,8 +171,9 @@ bin/omakeys-daemon \
   transparency-log timestamp, which also pins the `release.yml` signer
   workflow in the certificate's subject alternative name and the GitHub
   Actions OIDC issuer), and only then the signed provenance claims against the
-  pinned source commit. Nothing outside the pinned chain is trusted and the
-  system CA store is not consulted. The Rekor log entry is used only to date
+   pinned source commit. Nothing outside the pinned chain is trusted: the
+   chain check passes `-no-CApath`, so the host CA store is never consulted.
+   The Rekor log entry is used only to date
   the short-lived certificate; its inclusion proof is not re-checked offline
   (it provides auditability, not authenticity). Any missing proof fails closed
   before the setgid install; `--build-install` remains the fallback when the

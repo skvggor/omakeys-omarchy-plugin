@@ -827,8 +827,6 @@ test('pinned Sigstore trust anchor', async (t) => {
   const skip = OPENSSL ? false : 'openssl is not available'
   const fixture = JSON.parse(fs.readFileSync(FIXTURE_PATH, 'utf8'))
   const directory = fs.mkdtempSync(path.join(tempRoot, 'trust-anchor-'))
-  const emptyCaDir = path.join(directory, 'empty-ca')
-  fs.mkdirSync(emptyCaDir)
   const certificatePath = path.join(directory, 'certificate.der')
   const certificatePem = path.join(directory, 'certificate.pem')
   const publicKeyPath = path.join(directory, 'public-key.pem')
@@ -848,7 +846,7 @@ test('pinned Sigstore trust anchor', async (t) => {
   await t.test('chains the published v1.0.0 attestation to the pinned CA', { skip }, () => {
     runOpenssl(['x509', '-inform', 'der', '-in', certificatePath, '-out', certificatePem], directory)
     const verified = runOpenssl(
-      ['verify', '-attime', integratedTime, '-CAfile', CHAIN_PATH, '-CApath', emptyCaDir, certificatePem],
+      ['verify', '-attime', integratedTime, '-CAfile', CHAIN_PATH, '-no-CApath', certificatePem],
       directory
     )
     assert.match(verified.stdout, /: OK/)
@@ -880,15 +878,17 @@ test('pinned Sigstore trust anchor', async (t) => {
       subjects.push(runOpenssl(['x509', '-in', certificate, '-noout', '-subject'], directory).stdout)
     }
     assert.equal(subjects.length, 3)
-    for (const subject of subjects) assert.match(subject, /O=sigstore\.dev/)
+    for (const subject of subjects) assert.match(subject, /O\s*=\s*sigstore\.dev/)
   })
 
   await t.test('keeps the system CA store out of the trust path', { skip }, (t2) => {
     const systemRoot = SYSTEM_ROOT_CERTIFICATE
     if (!systemRoot) return t2.skip('no system root certificate available')
+    // Mirrors the installer: the pinned CAfile plus -no-CApath must be the only
+    // trust path, so a public root already trusted by the host still fails.
     const verified = spawnSync(
       OPENSSL,
-      ['verify', '-CAfile', CHAIN_PATH, '-CApath', emptyCaDir, systemRoot],
+      ['verify', '-CAfile', CHAIN_PATH, '-no-CApath', systemRoot],
       { encoding: 'utf8' }
     )
     assert.notEqual(verified.status, 0, `unexpectedly trusted: ${verified.stdout}`)
