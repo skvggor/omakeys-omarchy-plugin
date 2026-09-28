@@ -94,7 +94,8 @@ jobs:
 
           digest="sha256:$(sha256sum "$staged" | cut -d' ' -f1)"
           attestation_file="$(mktemp)"
-          trap 'rm -f "$attestation_file"' EXIT
+          bundle_file="$(mktemp)"
+          trap 'rm -f "$attestation_file" "$bundle_file"' EXIT
 
           ATTEST_CURL_OPTS=(--fail --location --retry 5 --retry-delay 2
             --connect-timeout 5 --max-time 20 --max-filesize 1048576
@@ -105,6 +106,17 @@ jobs:
             -H "User-Agent: omakeys-release" \
             "https://api.github.com/repos/skvggor/omakeys-omarchy-plugin/attestations/$digest" \
             -o "$attestation_file"
+
+          # Independent cross-check of the installer's openssl verification:
+          # gh verifies the same bundle with the Sigstore Go client (DSSE
+          # signature, Fulcio certificate, artifact digest and signer
+          # workflow) before the jq pass below reads its claims.
+          jq -e '.attestations[0].bundle' "$attestation_file" > "$bundle_file"
+          gh attestation verify "$staged" \
+            --repo "$GITHUB_REPOSITORY" \
+            --bundle "$bundle_file" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"
+          echo "bundle cryptographically verified: $asset"
 
           # Strict provenance check mirrors the installer's verify_attestation():
           # predicateType, subject digest, repository, buildType and source commit must all match.

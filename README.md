@@ -68,7 +68,11 @@ and it never runs as root.
 ## Requirements
 
 - Omarchy shell (Hyprland + Quickshell).
-- `curl` and `jq` (used by the installer to fetch and verify the prebuilt daemon).
+- `curl`, `jq` and `openssl` — the installer fetches the prebuilt daemon and
+  cryptographically verifies its Sigstore build attestation with the Fulcio CA
+  chain pinned in `bin/sigstore-fulcio-chain.pem` (`omarchy pkg add openssl`).
+  No GitHub account, `gh` or Sigstore client is needed: verification runs
+  locally against the downloaded bundle.
 - `libxkbcommon` at runtime (usually already present).
 - `hyprctl` reachable on `PATH` (used to discover the active keyboard layout).
 - Rust toolchain is **not** required for installation; it is only needed for
@@ -160,10 +164,21 @@ bin/omakeys-daemon \
 
 - **No network.** The daemon never connects anywhere; evdev is read locally.
 - **Supply-chain verification.** The installer downloads the daemon from the
-  GitHub **release**, checks its published SHA-256, and verifies its **Sigstore
-  build attestation** (proving the binary was produced by this repository's
-  Actions). It refuses to install otherwise. Manual verification is possible
-  with `gh attestation verify bin/omakeys-daemon --owner skvggor`.
+  GitHub **release**, checks its SHA-256 against the digest pinned in version
+  control, and then **cryptographically verifies** its Sigstore build
+  attestation with `openssl` and the pinned Fulcio CA chain: the DSSE
+  signature over the provenance payload, the certificate chain (dated by the
+  transparency-log timestamp, which also pins the `release.yml` signer
+  workflow in the certificate's subject alternative name and the GitHub
+  Actions OIDC issuer), and only then the signed provenance claims against the
+  pinned source commit. Nothing outside the pinned chain is trusted and the
+  system CA store is not consulted. The Rekor log entry is used only to date
+  the short-lived certificate; its inclusion proof is not re-checked offline
+  (it provides auditability, not authenticity). Any missing proof fails closed
+  before the setgid install; `--build-install` remains the fallback when the
+  network is unavailable. Manual re-check with the GitHub CLI (after
+  `gh auth login`):
+  `gh attestation verify <asset> --repo skvggor/omakeys-omarchy-plugin --signer-workflow skvggor/omakeys-omarchy-plugin/.github/workflows/release.yml`.
 - **Owner-only state.** The keystroke state file and the single-instance lock
   are written with mode `0600`, and the enable flag directory is created with
   `umask 077`. The file lives at

@@ -12,6 +12,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DAEMON="$SCRIPT_DIR/omakeys-daemon"
 REPO="skvggor/omakeys-omarchy-plugin"
+# Signer identity pinned during verification: only attestations whose Fulcio
+# certificate carries this workflow URI are accepted (GitHub Actions OIDC).
+SIGNER_WORKFLOW=".github/workflows/release.yml"
+OIDC_ISSUER="https://token.actions.githubusercontent.com"
 RELEASES_URL="https://github.com/$REPO/releases/download"
 ATTESTATIONS_API="https://api.github.com/repos/$REPO/attestations"
 HELPER_ASSET="omakeys-daemon-x86_64-linux-gnu"
@@ -26,7 +30,10 @@ EXPECTED_SOURCE_COMMIT="e252db81ff26b7f58376897369e2f62306838258"
 ACCEPTED_SOURCE_COMMITS=("e252db81ff26b7f58376897369e2f62306838258" "3f714a18085b6a71e892328c0a6923899a8f9028")
 # Pinned digest is also stored in version control at bin/omakeys-daemon-x86_64-linux-gnu.sha256
 PINNED_SHA256_FILE="$PROJECT_DIR/bin/omakeys-daemon-x86_64-linux-gnu.sha256"
+# Pinned Sigstore Fulcio CA chain: the trust anchor for the attestation certificate.
+FULCIO_CHAIN_FILE="$PROJECT_DIR/bin/sigstore-fulcio-chain.pem"
 asset_dir=""
+verify_dir=""
 
 fail() {
   echo "error: $*" >&2
@@ -35,6 +42,8 @@ fail() {
 
 cleanup() {
   [[ -n "$asset_dir" ]] && rm -rf "$asset_dir"
+  [[ -n "$verify_dir" ]] && rm -rf "$verify_dir"
+  return 0
 }
 
 trap cleanup EXIT
@@ -44,7 +53,7 @@ usage() {
   echo "  --check          Report daemon readiness and setgid status" >&2
   echo "  --build          Compile the daemon locally with cargo (developers only, no sudo)" >&2
   echo "  --build-install  Compile locally and setgid it to group 'input' (developers, sudo)" >&2
-  echo "  --install        Download the daemon from the latest GitHub release and setgid it (sudo, no Rust needed)" >&2
+  echo "  --install        Verify and download the daemon from the latest GitHub release, then setgid it (sudo, no Rust needed)" >&2
   echo "  --uninstall      Remove the setgid daemon binary (sudo)" >&2
   echo "  --usermod        Install from release and add the current user to the 'input' group (next login)" >&2
   echo "  -h, --help       Show this help" >&2
@@ -95,27 +104,32 @@ resolve_version() {
 }
 
 verify_attestation() {
-  local binary_path="$1"
-  local binary_sha256="$2"
-  local attestation_file
-  attestation_file="$(mktemp)"
-  trap "rm -f '$attestation_file'" RETURN
+  local binary_sha256="$1"
 
-  # Full Sigstore bundle verification via gh when available (cryptographic).
-  # gh attestation verify validates the DSSE envelope signature, Fulcio cert and Rekor transparency log.
-  if command -v gh >/dev/null 2>&1; then
-    local gh_opts=(--repo "$REPO")
-    if gh attestation verify --help 2>&1 | grep -q "signer-workflow"; then
-      gh_opts+=(--signer-workflow ".github/workflows/release.yml")
-    fi
-    if ! gh attestation verify "$binary_path" "${gh_opts[@]}" >/dev/null 2>&1; then
-      # gh present but verification failed -> fail closed. Fall back to API check only if gh is not authenticated
-      # and the failure was due to missing token/network; the strict provenance check below will still fail closed.
-      :
-    else
-      echo "Build attestation cryptographically verified (Sigstore via gh)" >&2
-    fi
+  # Fail closed: without openssl there is no way to check the DSSE signature or
+  # the Fulcio certificate chain, so the prebuilt path must not reach the setgid
+  # install.
+  if ! command -v openssl >/dev/null 2>&1; then
+    echo "error: openssl is required to verify the build attestation (omarchy pkg add openssl)" >&2
+    return 1
   fi
+  if [[ ! -f "$FULCIO_CHAIN_FILE" ]]; then
+    echo "error: pinned Sigstore CA chain not found at $FULCIO_CHAIN_FILE" >&2
+    return 1
+  fi
+
+  verify_dir="$(mktemp -d)" || return 1
+  local api_file="$verify_dir/attestations.json"
+  local bundle_file="$verify_dir/bundle.json"
+  local payload_file="$verify_dir/payload.bin"
+  local payload_type_file="$verify_dir/payload-type"
+  local signature_file="$verify_dir/signature.bin"
+  local certificate_der="$verify_dir/certificate.der"
+  local certificate_pem="$verify_dir/certificate.pem"
+  local public_key_file="$verify_dir/public-key.pem"
+  local signed_message="$verify_dir/pae-space.bin"
+  local colon_message="$verify_dir/pae-colon.bin"
+  local empty_ca_dir="$verify_dir/empty-ca"
 
   local curl_opts=(--fail --location --retry 4 --retry-delay 2
     --connect-timeout 5 --max-time 20 --max-filesize 1048576
@@ -125,17 +139,102 @@ verify_attestation() {
     -H "Accept: application/vnd.github+json" \
     -H "User-Agent: omakeys-installer" \
     "$ATTESTATIONS_API/sha256:$binary_sha256" \
-    -o "$attestation_file" \
+    -o "$api_file" \
     || return 1
 
-  # Strict provenance: predicateType, subject digest, repository and source commit.
-  # The bundle's DSSE payload is the signed part; we verify its contents after (or in addition to) Sigstore verification.
+  if ! jq -e '.attestations[0].bundle' "$api_file" >"$bundle_file" 2>/dev/null; then
+    echo "error: no attestation bundle published for sha256:$binary_sha256" >&2
+    return 1
+  fi
+
+  if ! jq -jer '.dsseEnvelope.payloadType' "$bundle_file" >"$payload_type_file" 2>/dev/null; then
+    echo "error: attestation bundle carries no DSSE payload type" >&2
+    return 1
+  fi
+  if ! jq -j '.dsseEnvelope.payload' "$bundle_file" 2>/dev/null | base64 -d >"$payload_file" 2>/dev/null; then
+    echo "error: attestation payload is not valid base64" >&2
+    return 1
+  fi
+  if ! jq -j '.dsseEnvelope.signatures[0].sig' "$bundle_file" 2>/dev/null | base64 -d >"$signature_file" 2>/dev/null; then
+    echo "error: attestation signature is not valid base64" >&2
+    return 1
+  fi
+  if ! jq -j '.verificationMaterial.certificate.rawBytes' "$bundle_file" 2>/dev/null | base64 -d >"$certificate_der" 2>/dev/null; then
+    echo "error: attestation certificate is not valid base64" >&2
+    return 1
+  fi
+
+  # The transparency-log timestamp dates the Fulcio certificate: the short-lived
+  # signing certificate only chains back to the pinned CA at that instant.
+  local integrated_time
+  if ! integrated_time="$(jq -er '.verificationMaterial.tlogEntries[0].integratedTime' "$bundle_file" 2>/dev/null)" \
+    || [[ ! "$integrated_time" =~ ^[0-9]+$ ]]; then
+    echo "error: attestation bundle carries no usable transparency-log timestamp" >&2
+    return 1
+  fi
+
+  if ! openssl x509 -inform der -in "$certificate_der" -out "$certificate_pem" 2>/dev/null; then
+    echo "error: attestation certificate could not be parsed" >&2
+    return 1
+  fi
+
+  mkdir -p "$empty_ca_dir" || return 1
+  local chain_output
+  if ! chain_output="$(openssl verify -attime "$integrated_time" \
+        -CAfile "$FULCIO_CHAIN_FILE" -CApath "$empty_ca_dir" "$certificate_pem" 2>&1)"; then
+    echo "error: attestation certificate does not chain to the pinned Sigstore CA:" >&2
+    echo "$chain_output" >&2
+    return 1
+  fi
+
+  local certificate_text
+  if ! certificate_text="$(openssl x509 -in "$certificate_pem" -noout -text 2>/dev/null)"; then
+    echo "error: attestation certificate could not be read" >&2
+    return 1
+  fi
+  if ! grep -qF "URI:https://github.com/$REPO/$SIGNER_WORKFLOW@" <<<"$certificate_text"; then
+    echo "error: attestation was not signed by $REPO/$SIGNER_WORKFLOW" >&2
+    return 1
+  fi
+  if ! grep -qF "$OIDC_ISSUER" <<<"$certificate_text"; then
+    echo "error: attestation certificate carries no GitHub Actions OIDC issuer" >&2
+    return 1
+  fi
+
+  if ! openssl x509 -in "$certificate_pem" -pubkey -noout >"$public_key_file" 2>/dev/null; then
+    echo "error: attestation public key could not be extracted" >&2
+    return 1
+  fi
+
+  # Pre-Authentication Encoding of the DSSE envelope: "DSSEv1 <type length> <type>
+  # <payload length> <payload>", the space separated form produced by
+  # go-securesystemslib. The colon separated variant is accepted too, so bundles
+  # from older signing stacks keep verifying.
+  local payload_type_length payload_length
+  payload_type_length="$(wc -c <"$payload_type_file" | tr -d '[:space:]')" || return 1
+  payload_length="$(wc -c <"$payload_file" | tr -d '[:space:]')" || return 1
+  {
+    printf 'DSSEv1 %s %s %s ' "$payload_type_length" "$(cat "$payload_type_file")" "$payload_length"
+    cat "$payload_file"
+  } >"$signed_message" || return 1
+  {
+    printf 'DSSEv1%s:%s%s:' "$payload_type_length" "$(cat "$payload_type_file")" "$payload_length"
+    cat "$payload_file"
+  } >"$colon_message" || return 1
+
+  if ! openssl dgst -sha256 -verify "$public_key_file" -signature "$signature_file" "$signed_message" >/dev/null 2>&1 \
+    && ! openssl dgst -sha256 -verify "$public_key_file" -signature "$signature_file" "$colon_message" >/dev/null 2>&1; then
+    echo "error: DSSE signature of the attestation payload does not verify" >&2
+    return 1
+  fi
+
+  # The payload is authenticated now that its signature verified, so its claims
+  # (predicate type, subject digest, repository, build type, source commit) can
+  # be checked without trusting the transport.
   local expected_repo="https://github.com/$REPO"
-  # Check subject digest, predicateType, repository and that the build's resolvedDependencies commit is accepted.
-  # We accept either the reviewed commit or the release commit that produced the current pinned digest (transition).
-  jq -e --arg sha256 "$binary_sha256" --arg repo "$expected_repo" \
+  if ! jq -e --arg sha256 "$binary_sha256" --arg repo "$expected_repo" \
     --arg commit1 "${ACCEPTED_SOURCE_COMMITS[0]}" --arg commit2 "${ACCEPTED_SOURCE_COMMITS[1]}" '
-    .attestations[0].bundle.dsseEnvelope.payload
+    .dsseEnvelope.payload
     | @base64d | fromjson
     | select(.predicateType == "https://slsa.dev/provenance/v1")
     | select(.subject[0].digest.sha256 == $sha256)
@@ -145,10 +244,12 @@ verify_attestation() {
         .predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit == $commit1
         or .predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit == $commit2
       )
-  ' "$attestation_file" >/dev/null 2>&1 \
-    || return 1
+  ' "$bundle_file" >/dev/null 2>&1; then
+    echo "error: attestation provenance does not match the pinned source commit" >&2
+    return 1
+  fi
 
-  echo "Build attestation verified (provenance for $binary_sha256, source ${ACCEPTED_SOURCE_COMMITS[*]})" >&2
+  echo "Build attestation cryptographically verified (Sigstore bundle, signer $REPO/$SIGNER_WORKFLOW; provenance for $binary_sha256, source ${ACCEPTED_SOURCE_COMMITS[*]})" >&2
   return 0
 }
 
@@ -189,10 +290,11 @@ fetch_release() {
     fail "pinned digest file $PINNED_SHA256_FILE not found in plugin tree; refusing to install (supply-chain pin missing)"
   fi
 
-  if ! verify_attestation "$asset_dir/$HELPER_ASSET" "$binary_sha256"; then
+  if ! verify_attestation "$binary_sha256"; then
     fail "attestation verification failed for $HELPER_ASSET $version; refusing to install it.
-  Check your network (the GitHub API rate-limits unauthenticated requests) and retry,
-  or verify manually with: gh attestation verify $asset_dir/$HELPER_ASSET --repo $REPO"
+  Check your network (the GitHub API rate-limits unauthenticated requests),
+  install openssl when missing (omarchy pkg add openssl), or build from
+  source with --build-install"
   fi
 
   run_as_root install -m 2755 -o root -g input "$asset_dir/$HELPER_ASSET" "$DAEMON"
@@ -261,9 +363,6 @@ case "${1:-}" in
     fetch_release
     add_to_input_group
     ;;
-  -h | --help)
-    usage
-    exit 0
-    ;;
+  -h | --help) usage ;;
   *) usage ;;
 esac
