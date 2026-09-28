@@ -49,7 +49,11 @@ impl DeviceRegistry {
         let mut saw_event_device = false;
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.file_name().map(|n| n.to_string_lossy().starts_with("event")).unwrap_or(false) {
+            if !path
+                .file_name()
+                .map(|n| n.to_string_lossy().starts_with("event"))
+                .unwrap_or(false)
+            {
                 continue;
             }
             saw_event_device = true;
@@ -116,7 +120,13 @@ fn classify(path: &Path) -> Option<DeviceKind> {
     None
 }
 
-fn spawn_reader(sender: Sender<DeviceEvent>, open_set: Arc<Mutex<HashSet<String>>>, path: String, kind: DeviceKind, debug: bool) {
+fn spawn_reader(
+    sender: Sender<DeviceEvent>,
+    open_set: Arc<Mutex<HashSet<String>>>,
+    path: String,
+    kind: DeviceKind,
+    debug: bool,
+) {
     std::thread::spawn(move || {
         let mut device = match Device::open(Path::new(&path)) {
             Ok(device) => device,
@@ -132,7 +142,7 @@ fn spawn_reader(sender: Sender<DeviceEvent>, open_set: Arc<Mutex<HashSet<String>
                 std::fs::canonicalize(&path)
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|_| path.clone())
-                );
+            );
         }
         loop {
             let events = match device.fetch_events() {
@@ -180,9 +190,15 @@ fn translate(event: evdev::InputEvent, kind: DeviceKind) -> Option<DeviceEvent> 
             }
             let pressed = value == 1;
             if code.code() >= 0x100 && kind == DeviceKind::Mouse {
-                return Some(DeviceEvent::Btn { code: code.code(), pressed });
+                return Some(DeviceEvent::Btn {
+                    code: code.code(),
+                    pressed,
+                });
             }
-            Some(DeviceEvent::Key { code: code.code(), pressed })
+            Some(DeviceEvent::Key {
+                code: code.code(),
+                pressed,
+            })
         }
         EventSummary::RelativeAxis(_, code, value) => {
             if kind != DeviceKind::Mouse {
@@ -191,12 +207,12 @@ fn translate(event: evdev::InputEvent, kind: DeviceKind) -> Option<DeviceEvent> 
             match code {
                 RelativeAxisCode::REL_WHEEL => Some(DeviceEvent::ScrollV { delta: value }),
                 RelativeAxisCode::REL_HWHEEL => Some(DeviceEvent::ScrollH { delta: value }),
-                RelativeAxisCode::REL_WHEEL_HI_RES => {
-                    Some(DeviceEvent::ScrollV { delta: high_res_delta(value) })
-                }
-                RelativeAxisCode::REL_HWHEEL_HI_RES => {
-                    Some(DeviceEvent::ScrollH { delta: high_res_delta(value) })
-                }
+                RelativeAxisCode::REL_WHEEL_HI_RES => Some(DeviceEvent::ScrollV {
+                    delta: high_res_delta(value),
+                }),
+                RelativeAxisCode::REL_HWHEEL_HI_RES => Some(DeviceEvent::ScrollH {
+                    delta: high_res_delta(value),
+                }),
                 _ => None,
             }
         }
@@ -243,12 +259,21 @@ mod tests {
     fn key_down_is_described() {
         let pressed = evdev::InputEvent::new(evdev::EventType::KEY.0, 30, 1);
         let translated = translate(pressed, DeviceKind::Keyboard);
-        assert!(matches!(translated, Some(DeviceEvent::Key { code: 30, pressed: true })));
+        assert!(matches!(
+            translated,
+            Some(DeviceEvent::Key {
+                code: 30,
+                pressed: true
+            })
+        ));
 
         let released = evdev::InputEvent::new(evdev::EventType::KEY.0, 30, 0);
         assert!(matches!(
             translate(released, DeviceKind::Keyboard),
-            Some(DeviceEvent::Key { code: 30, pressed: false })
+            Some(DeviceEvent::Key {
+                code: 30,
+                pressed: false
+            })
         ));
     }
 
@@ -257,7 +282,10 @@ mod tests {
         let pressed = evdev::InputEvent::new(evdev::EventType::KEY.0, 0x110, 1);
         assert!(matches!(
             translate(pressed, DeviceKind::Mouse),
-            Some(DeviceEvent::Btn { code: 0x110, pressed: true })
+            Some(DeviceEvent::Btn {
+                code: 0x110,
+                pressed: true
+            })
         ));
     }
 

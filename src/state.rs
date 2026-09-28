@@ -119,7 +119,13 @@ impl AppState {
                 .mod_display_name(code)
                 .unwrap_or_else(|| xkb.sym_name_of(code));
             self.order += 1;
-            self.mod_entries.insert(code, HeldEntry { display, order: self.order });
+            self.mod_entries.insert(
+                code,
+                HeldEntry {
+                    display,
+                    order: self.order,
+                },
+            );
             self.last_activity_ms = now_ms();
         } else {
             self.mod_entries.remove(&code);
@@ -128,7 +134,13 @@ impl AppState {
 
     fn press_key(&mut self, code: u16, display: String) {
         self.order += 1;
-        self.key_entries.insert(code, HeldEntry { display, order: self.order });
+        self.key_entries.insert(
+            code,
+            HeldEntry {
+                display,
+                order: self.order,
+            },
+        );
         self.last_activity_ms = now_ms();
     }
 
@@ -138,7 +150,13 @@ impl AppState {
 
     fn press_button(&mut self, code: u16, display: String) {
         self.order += 1;
-        self.mouse_entries.insert(code, HeldEntry { display, order: self.order });
+        self.mouse_entries.insert(
+            code,
+            HeldEntry {
+                display,
+                order: self.order,
+            },
+        );
         self.last_activity_ms = now_ms();
     }
 
@@ -159,7 +177,11 @@ impl AppState {
     fn push_mouse_event(&mut self) {
         let mut parts: Vec<String> = Vec::new();
         parts.extend(self.ordered_mods());
-        parts.extend(self.mouse_entries.values().map(|entry| entry.display.clone()));
+        parts.extend(
+            self.mouse_entries
+                .values()
+                .map(|entry| entry.display.clone()),
+        );
         if parts.is_empty() {
             return;
         }
@@ -195,7 +217,10 @@ impl AppState {
     fn ordered_mods(&self) -> Vec<String> {
         let mut entries: Vec<&HeldEntry> = self.mod_entries.values().collect();
         entries.sort_by_key(|entry| named_mod_rank(&entry.display));
-        entries.into_iter().map(|entry| entry.display.clone()).collect()
+        entries
+            .into_iter()
+            .map(|entry| entry.display.clone())
+            .collect()
     }
 
     fn snapshot_json(&self, error: &str) -> String {
@@ -267,9 +292,27 @@ mod tests {
     #[test]
     fn combo_builds_mods_first_then_keys() {
         let (mut app_state, mut xkb) = state();
-        app_state.handle(&mut xkb, DeviceEvent::Key { code: 0x38, pressed: true });
-        app_state.handle(&mut xkb, DeviceEvent::Key { code: 0x1d, pressed: true });
-        app_state.handle(&mut xkb, DeviceEvent::Key { code: 0x1e, pressed: true });
+        app_state.handle(
+            &mut xkb,
+            DeviceEvent::Key {
+                code: 0x38,
+                pressed: true,
+            },
+        );
+        app_state.handle(
+            &mut xkb,
+            DeviceEvent::Key {
+                code: 0x1d,
+                pressed: true,
+            },
+        );
+        app_state.handle(
+            &mut xkb,
+            DeviceEvent::Key {
+                code: 0x1e,
+                pressed: true,
+            },
+        );
         let json = app_state.snapshot_json("");
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["keys"], serde_json::json!(["Ctrl", "Alt", "a"]));
@@ -278,8 +321,20 @@ mod tests {
     #[test]
     fn releasing_a_key_drops_it_from_the_combo() {
         let (mut app_state, mut xkb) = state();
-        app_state.handle(&mut xkb, DeviceEvent::Key { code: 0x1e, pressed: true });
-        app_state.handle(&mut xkb, DeviceEvent::Key { code: 0x1e, pressed: false });
+        app_state.handle(
+            &mut xkb,
+            DeviceEvent::Key {
+                code: 0x1e,
+                pressed: true,
+            },
+        );
+        app_state.handle(
+            &mut xkb,
+            DeviceEvent::Key {
+                code: 0x1e,
+                pressed: false,
+            },
+        );
         let parsed: serde_json::Value = serde_json::from_str(&app_state.snapshot_json("")).unwrap();
         assert_eq!(parsed["keys"], serde_json::json!([]));
     }
@@ -287,10 +342,22 @@ mod tests {
     #[test]
     fn modifier_press_alone_generates_an_event() {
         let (mut app_state, mut xkb) = state();
-        app_state.handle(&mut xkb, DeviceEvent::Key { code: 0x3a, pressed: true }); // Caps_Lock
+        app_state.handle(
+            &mut xkb,
+            DeviceEvent::Key {
+                code: 0x3a,
+                pressed: true,
+            },
+        ); // Caps_Lock
         let texts = app_state.events_texts();
         assert_eq!(texts[0], "Caps");
-        app_state.handle(&mut xkb, DeviceEvent::Key { code: 0x3a, pressed: false });
+        app_state.handle(
+            &mut xkb,
+            DeviceEvent::Key {
+                code: 0x3a,
+                pressed: false,
+            },
+        );
         let parsed: serde_json::Value = serde_json::from_str(&app_state.snapshot_json("")).unwrap();
         assert_eq!(parsed["keys"], serde_json::json!([]));
     }
@@ -298,9 +365,27 @@ mod tests {
     #[test]
     fn chained_modifier_presses_build_the_combo_incrementally() {
         let (mut app_state, mut xkb) = state();
-        app_state.handle(&mut xkb, DeviceEvent::Key { code: 0x1d, pressed: true }); // Ctrl
-        app_state.handle(&mut xkb, DeviceEvent::Key { code: 0x38, pressed: true }); // Alt
-        app_state.handle(&mut xkb, DeviceEvent::Key { code: 0x1e, pressed: true }); // 'a'
+        app_state.handle(
+            &mut xkb,
+            DeviceEvent::Key {
+                code: 0x1d,
+                pressed: true,
+            },
+        ); // Ctrl
+        app_state.handle(
+            &mut xkb,
+            DeviceEvent::Key {
+                code: 0x38,
+                pressed: true,
+            },
+        ); // Alt
+        app_state.handle(
+            &mut xkb,
+            DeviceEvent::Key {
+                code: 0x1e,
+                pressed: true,
+            },
+        ); // 'a'
         let texts = app_state.events_texts();
         assert_eq!(texts[0], "Ctrl+Alt+a");
         assert_eq!(texts[1], "Ctrl+Alt");
@@ -310,11 +395,23 @@ mod tests {
     #[test]
     fn tapping_a_modifier_keeps_its_event_for_the_overlay() {
         let (mut app_state, mut xkb) = state();
-        app_state.handle(&mut xkb, DeviceEvent::Key { code: 0x3a, pressed: true }); // Caps press
+        app_state.handle(
+            &mut xkb,
+            DeviceEvent::Key {
+                code: 0x3a,
+                pressed: true,
+            },
+        ); // Caps press
         let pressed: serde_json::Value =
             serde_json::from_str(&app_state.snapshot_json("")).unwrap();
         assert_eq!(pressed["keys"], serde_json::json!(["Caps"]));
-        app_state.handle(&mut xkb, DeviceEvent::Key { code: 0x3a, pressed: false }); // Caps release
+        app_state.handle(
+            &mut xkb,
+            DeviceEvent::Key {
+                code: 0x3a,
+                pressed: false,
+            },
+        ); // Caps release
         let released: serde_json::Value =
             serde_json::from_str(&app_state.snapshot_json("")).unwrap();
         assert_eq!(released["keys"], serde_json::json!([]));
@@ -324,8 +421,20 @@ mod tests {
     #[test]
     fn mouse_buttons_surface_separately() {
         let (mut app_state, mut xkb) = state();
-        app_state.handle(&mut xkb, DeviceEvent::Key { code: 0x1d, pressed: true });
-        app_state.handle(&mut xkb, DeviceEvent::Btn { code: 0x110, pressed: true });
+        app_state.handle(
+            &mut xkb,
+            DeviceEvent::Key {
+                code: 0x1d,
+                pressed: true,
+            },
+        );
+        app_state.handle(
+            &mut xkb,
+            DeviceEvent::Btn {
+                code: 0x110,
+                pressed: true,
+            },
+        );
         let json = app_state.snapshot_json("");
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["mouse"], serde_json::json!(["LEFT MOUSE BUTTON"]));
@@ -345,8 +454,20 @@ mod tests {
     fn rapid_near_identical_combos_are_deduplicated() {
         let (mut app_state, mut xkb) = state();
         for _ in 0..4 {
-            app_state.handle(&mut xkb, DeviceEvent::Key { code: 0x1e, pressed: true });
-            app_state.handle(&mut xkb, DeviceEvent::Key { code: 0x1e, pressed: false });
+            app_state.handle(
+                &mut xkb,
+                DeviceEvent::Key {
+                    code: 0x1e,
+                    pressed: true,
+                },
+            );
+            app_state.handle(
+                &mut xkb,
+                DeviceEvent::Key {
+                    code: 0x1e,
+                    pressed: false,
+                },
+            );
         }
         let texts = app_state.events_texts();
         assert_eq!(texts[0], "a");
@@ -356,7 +477,13 @@ mod tests {
     #[test]
     fn snapshot_is_well_formed() {
         let (mut app_state, mut xkb) = state();
-        app_state.handle(&mut xkb, DeviceEvent::Key { code: 0x1e, pressed: true });
+        app_state.handle(
+            &mut xkb,
+            DeviceEvent::Key {
+                code: 0x1e,
+                pressed: true,
+            },
+        );
         let parsed: serde_json::Value = serde_json::from_str(&app_state.snapshot_json("")).unwrap();
         assert_eq!(parsed["version"], 1);
         assert_eq!(parsed["ok"], true);
@@ -366,8 +493,20 @@ mod tests {
     #[test]
     fn reset_clears_held_keys_and_history() {
         let (mut app_state, mut xkb) = state();
-        app_state.handle(&mut xkb, DeviceEvent::Key { code: 0x1d, pressed: true });
-        app_state.handle(&mut xkb, DeviceEvent::Key { code: 0x1e, pressed: true });
+        app_state.handle(
+            &mut xkb,
+            DeviceEvent::Key {
+                code: 0x1d,
+                pressed: true,
+            },
+        );
+        app_state.handle(
+            &mut xkb,
+            DeviceEvent::Key {
+                code: 0x1e,
+                pressed: true,
+            },
+        );
         app_state.handle(&mut xkb, DeviceEvent::ScrollV { delta: -1 });
         app_state.reset();
         let parsed: serde_json::Value = serde_json::from_str(&app_state.snapshot_json("")).unwrap();

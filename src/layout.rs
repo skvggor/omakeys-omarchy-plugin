@@ -40,9 +40,9 @@ pub enum KeyDisplay {
 impl KeyDisplay {
     pub fn into_display_name(self) -> String {
         match self {
-            KeyDisplay::Modifier(name)
-            | KeyDisplay::Character(name)
-            | KeyDisplay::Label(name) => name,
+            KeyDisplay::Modifier(name) | KeyDisplay::Character(name) | KeyDisplay::Label(name) => {
+                name
+            }
         }
     }
 }

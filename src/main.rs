@@ -174,7 +174,8 @@ fn acquire_lock(state_path: &std::path::Path) -> std::fs::File {
 
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
             let _ = file.set_len(0);
-            let _ = write_all_ignoring_errors(&file, format!("{}\n", std::process::id()).as_bytes());
+            let _ =
+                write_all_ignoring_errors(&file, format!("{}\n", std::process::id()).as_bytes());
             return file;
         }
 
@@ -256,10 +257,7 @@ fn write_state(path: &std::path::Path, json: &str) {
             let _ = file.flush();
         }
         Err(error) => {
-            eprintln!(
-                "omakeys-daemon: cannot write {}: {error}",
-                path.display()
-            );
+            eprintln!("omakeys-daemon: cannot write {}: {error}", path.display());
         }
     }
 }
@@ -294,7 +292,11 @@ mod tests {
         let dir = unique_dir("held");
         let path = dir.join("keys.lock");
         std::fs::write(&path, content.as_bytes()).unwrap();
-        std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap()
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap()
     }
 
     #[test]
@@ -314,18 +316,28 @@ mod tests {
     #[test]
     fn read_enabled_treats_garbage_and_empty_as_true() {
         assert!(read_enabled(&write_enable(&unique_dir("garbage"), "")));
-        assert!(read_enabled(&write_enable(&unique_dir("garbage1"), "maybe")));
+        assert!(read_enabled(&write_enable(
+            &unique_dir("garbage1"),
+            "maybe"
+        )));
     }
 
     #[test]
     fn default_enable_path_sits_next_to_state_file() {
         let state = std::path::PathBuf::from("/some/plugin/keys.json");
-        assert_eq!(default_enable_path(&state), std::path::PathBuf::from("/some/plugin/enabled"));
+        assert_eq!(
+            default_enable_path(&state),
+            std::path::PathBuf::from("/some/plugin/enabled")
+        );
     }
 
     #[test]
     fn arg_value_reads_flag_values() {
-        let args: Vec<String> = vec!["--state".to_string(), "s.json".to_string(), "--debug".to_string()];
+        let args: Vec<String> = vec![
+            "--state".to_string(),
+            "s.json".to_string(),
+            "--debug".to_string(),
+        ];
         assert_eq!(arg_value(&args, "--state"), Some("s.json".to_string()));
         assert_eq!(arg_value(&args, "--debug"), None);
         assert_eq!(arg_value(&["--debug".to_string()], "--state"), None);
@@ -366,7 +378,11 @@ mod tests {
         let path = dir.join("keys.json");
         write_state(&path, r#"{"keys":["a"]}"#);
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o077, 0, "state file must not be group/world readable");
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "state file must not be group/world readable"
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), r#"{"keys":["a"]}"#);
     }
 
@@ -442,7 +458,11 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_sender = stop.clone();
         let sender = std::thread::spawn(move || {
-            tx.send(DeviceEvent::Key { code: 0x1e, pressed: true }).unwrap();
+            tx.send(DeviceEvent::Key {
+                code: 0x1e,
+                pressed: true,
+            })
+            .unwrap();
             std::thread::sleep(Duration::from_millis(250));
             stop_sender.store(true, Ordering::Relaxed);
         });
@@ -475,7 +495,11 @@ mod tests {
         let stop_sender = stop.clone();
         let enable_sender = enable.clone();
         let sender = std::thread::spawn(move || {
-            tx.send(DeviceEvent::Key { code: 0x1e, pressed: true }).unwrap();
+            tx.send(DeviceEvent::Key {
+                code: 0x1e,
+                pressed: true,
+            })
+            .unwrap();
             std::thread::sleep(Duration::from_millis(200));
             std::fs::write(&enable_sender, "false").unwrap();
             std::thread::sleep(Duration::from_millis(300));

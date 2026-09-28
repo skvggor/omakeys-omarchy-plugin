@@ -17,21 +17,8 @@ pub const MODIFIER_SYMS: &[&str] = &[
 ];
 
 pub const MODIFIER_DISPLAY: &[&str] = &[
-    "Ctrl",
-    "Ctrl",
-    "Shift",
-    "Shift",
-    "Alt",
-    "Alt",
-    "Super",
-    "Super",
-    "Super",
-    "Super",
-    "Super",
-    "Super",
-    "AltGr",
-    "AltGr",
-    "Caps",
+    "Ctrl", "Ctrl", "Shift", "Shift", "Alt", "Alt", "Super", "Super", "Super", "Super", "Super",
+    "Super", "AltGr", "AltGr", "Caps",
 ];
 
 pub fn is_modifier(sym_name: &str) -> bool {
