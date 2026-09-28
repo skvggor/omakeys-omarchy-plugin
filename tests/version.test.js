@@ -37,6 +37,43 @@ test('manifest exposes a service, a bar widget, and an overlay panel', () => {
   assert.equal(data.entryPoints.panel, 'Overlay.qml')
 })
 
+function cargoLicense() {
+  const cargo = fs.readFileSync(path.join(root, 'Cargo.toml'), 'utf8')
+  const match = cargo.match(/^license\s*=\s*"([^"]+)"/m)
+  assert.ok(match, 'Cargo.toml must declare a license')
+  return match[1]
+}
+
+test('manifest.json and Cargo.toml declare the same license', () => {
+  assert.equal(manifest().license, cargoLicense())
+})
+
+test('the LICENSE file matches the declared SPDX license', () => {
+  const declared = cargoLicense()
+  const license = fs.readFileSync(path.join(root, 'LICENSE'), 'utf8')
+
+  if (declared === 'GPL-3.0-or-later') {
+    assert.match(license, /GNU GENERAL PUBLIC LICENSE\s+Version 3/)
+  } else if (declared === 'MIT') {
+    assert.match(license, /MIT License/)
+  } else {
+    assert.fail(`unsupported SPDX license: ${declared}`)
+  }
+})
+
+test('the README names the same license as the manifest', () => {
+  const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8')
+  const declared = manifest().license
+
+  if (declared === 'GPL-3.0-or-later') {
+    assert.match(readme, /GNU General Public License v3\.0/i)
+  } else if (declared === 'MIT') {
+    assert.match(readme, /\bMIT\b/)
+  } else {
+    assert.fail(`unsupported SPDX license: ${declared}`)
+  }
+})
+
 test('manifest defaults match the schema defaultValues', () => {
   const data = manifest()
   const widget = data.barWidget || {}
