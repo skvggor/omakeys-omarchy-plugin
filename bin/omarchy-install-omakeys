@@ -183,13 +183,15 @@ verify_attestation() {
     return 1
   fi
 
-  # -no-CApath, not an empty -CApath: pointing the directory at an empty folder
-  # only suppresses the default store on some OpenSSL builds, while -no-CApath
-  # states outright that no default directory may be consulted. Without it a
-  # public root on the host can satisfy the chain and widen the trust path.
+  # -trusted names the pinned CA as the only anchor and -no-CApath/-no-CAfile
+  # drop the host stores. Passing the chain with -CAfile is not enough: on
+  # OpenSSL 3.0.x `openssl verify -CAfile chain <root>` reports OK for any
+  # self-signed certificate, so the chain check would silently pass for a root
+  # the host already trusts. -trusted cannot be combined with -CAfile and is
+  # not subject to that behaviour.
   local chain_output
   if ! chain_output="$(openssl verify -attime "$integrated_time" \
-        -CAfile "$FULCIO_CHAIN_FILE" -no-CApath "$certificate_pem" 2>&1)"; then
+        -trusted "$FULCIO_CHAIN_FILE" -no-CApath -no-CAfile "$certificate_pem" 2>&1)"; then
     echo "error: attestation certificate does not chain to the pinned Sigstore CA:" >&2
     echo "$chain_output" >&2
     return 1
@@ -325,7 +327,9 @@ build_daemon() {
     echo "daemon built and installed at $DAEMON (setgid root:input)"
   else
     cp "$built" "$DAEMON"
-    chmod +x "$DAEMON"
+    # Explicit mode, not `chmod +x`: the copy inherits the caller's umask, so a
+    # permissive one would leave the daemon group-writable.
+    chmod 0755 "$DAEMON"
     echo "daemon built and installed at $DAEMON (local permissions)"
   fi
 }

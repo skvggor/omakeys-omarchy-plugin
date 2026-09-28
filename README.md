@@ -172,7 +172,9 @@ bin/omakeys-daemon \
   workflow in the certificate's subject alternative name and the GitHub
   Actions OIDC issuer), and only then the signed provenance claims against the
    pinned source commit. Nothing outside the pinned chain is trusted: the
-   chain check passes `-no-CApath`, so the host CA store is never consulted.
+   chain check names the pinned CA with `openssl verify -trusted` and disables
+   the host stores with `-no-CApath -no-CAfile`, so the system CA store is
+   never consulted.
    The Rekor log entry is used only to date
   the short-lived certificate; its inclusion proof is not re-checked offline
   (it provides auditability, not authenticity). Any missing proof fails closed

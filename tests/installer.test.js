@@ -846,7 +846,7 @@ test('pinned Sigstore trust anchor', async (t) => {
   await t.test('chains the published v1.0.0 attestation to the pinned CA', { skip }, () => {
     runOpenssl(['x509', '-inform', 'der', '-in', certificatePath, '-out', certificatePem], directory)
     const verified = runOpenssl(
-      ['verify', '-attime', integratedTime, '-CAfile', CHAIN_PATH, '-no-CApath', certificatePem],
+      ['verify', '-attime', integratedTime, '-trusted', CHAIN_PATH, '-no-CApath', '-no-CAfile', certificatePem],
       directory
     )
     assert.match(verified.stdout, /: OK/)
@@ -884,11 +884,12 @@ test('pinned Sigstore trust anchor', async (t) => {
   await t.test('keeps the system CA store out of the trust path', { skip }, (t2) => {
     const systemRoot = SYSTEM_ROOT_CERTIFICATE
     if (!systemRoot) return t2.skip('no system root certificate available')
-    // Mirrors the installer: the pinned CAfile plus -no-CApath must be the only
-    // trust path, so a public root already trusted by the host still fails.
+    // Mirrors the installer. On OpenSSL 3.0.x, passing the chain with -CAfile
+    // reports OK for any self-signed certificate, so this also guards the
+    // -trusted form the installer relies on.
     const verified = spawnSync(
       OPENSSL,
-      ['verify', '-CAfile', CHAIN_PATH, '-no-CApath', systemRoot],
+      ['verify', '-trusted', CHAIN_PATH, '-no-CApath', '-no-CAfile', systemRoot],
       { encoding: 'utf8' }
     )
     assert.notEqual(verified.status, 0, `unexpectedly trusted: ${verified.stdout}`)
