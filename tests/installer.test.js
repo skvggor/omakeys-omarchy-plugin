@@ -760,6 +760,24 @@ test('bin/omarchy-install-omakeys', async (t) => {
     assertInstallRefused(createSandbox({ statement: { commit: KNOWN_COMMIT } }), /provenance does not match the pinned source commit/)
   })
 
+  // Guards the failure that made --install refuse the real published release:
+  // the allowlist had three entries while the comparison named two of them, so
+  // the commit the v1.0.1 asset was actually built from was never accepted even
+  // though it was recorded. Every entry is exercised here, so an entry cannot be
+  // added to ACCEPTED_SOURCE_COMMITS and left out of the comparison.
+  await t.test('accepts every commit in the allowlist, not only the first ones', { skip: skipReason }, () => {
+    assert.ok(ACCEPTED_COMMITS.length >= 3, 'the allowlist is expected to carry the reviewed and published commits')
+
+    for (const commit of ACCEPTED_COMMITS) {
+      const sandbox = createSandbox({ statement: { commit } })
+      const result = sandbox.run(['--install'])
+
+      assert.equal(result.status, 0, `commit ${commit} is in the allowlist but was refused: ${result.stderr}`)
+      assert.match(result.stderr, new RegExp(`source ${commit}`), 'the reported commit must be the one that matched')
+      assert.equal(fs.statSync(sandbox.daemon).mode & 0o7777, 0o2755)
+    }
+  })
+
   await t.test('refuses when the signed provenance predicate type differs', { skip: skipReason }, () => {
     assertInstallRefused(createSandbox({ statement: { predicateType: 'https://example.dev/provenance/v0' } }), /provenance does not match the pinned source commit/)
   })

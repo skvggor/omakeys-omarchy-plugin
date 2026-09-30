@@ -33,7 +33,10 @@ HELPER_ASSET="omakeys-daemon-x86_64-linux-gnu"
 # entry can be quietly repointed at different code.
 # The version-controlled digest pins a single asset, so only the v1.0.1 entry
 # is reachable: the two older ones are kept as the record of what was reviewed
-# and published, not as installable targets.
+# and published, not as installable targets. All entries are enforced, not just
+# the first two — verify_attestation() matches against this whole array, and a
+# test asserts that every entry is accepted, so an entry cannot be recorded here
+# and then quietly left out of the comparison.
 # Cutting a release takes a follow-up commit: the attestation names the tagged
 # commit and a tree cannot contain its own SHA, so the release commit is added
 # here in the next commit, together with the new pinned digest:
@@ -251,24 +254,40 @@ verify_attestation() {
   # (predicate type, subject digest, repository, build type, source commit) can
   # be checked without trusting the transport.
   local expected_repo="https://github.com/$REPO"
-  if ! jq -e --arg sha256 "$binary_sha256" --arg repo "$expected_repo" \
-    --arg commit1 "${ACCEPTED_SOURCE_COMMITS[0]}" --arg commit2 "${ACCEPTED_SOURCE_COMMITS[1]}" '
+
+  # Every allowlist entry must be a full commit SHA. The list is encoded as JSON
+  # and matched with IN, so an entry can never be added here and then silently
+  # left out of the comparison below: the filter and the array are the same
+  # value, and the commit that actually matched is reported.
+  local accepted_commits_json
+  accepted_commits_json="$(
+    for commit in "${ACCEPTED_SOURCE_COMMITS[@]}"; do
+      [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || {
+        echo "error: malformed entry in ACCEPTED_SOURCE_COMMITS: $commit" >&2
+        exit 1
+      }
+      printf '%s\n' "$commit"
+    done | jq -R . | jq -sc .
+  )" || return 1
+
+  local matched_commit
+  if ! matched_commit="$(jq -er --arg sha256 "$binary_sha256" --arg repo "$expected_repo" \
+    --argjson accepted "$accepted_commits_json" '
     .dsseEnvelope.payload
     | @base64d | fromjson
     | select(.predicateType == "https://slsa.dev/provenance/v1")
     | select(.subject[0].digest.sha256 == $sha256)
     | select(.predicate.buildDefinition.externalParameters.workflow.repository == $repo)
     | select(.predicate.buildDefinition.buildType == "https://actions.github.io/buildtypes/workflow/v1")
-    | select(
-        .predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit == $commit1
-        or .predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit == $commit2
-      )
-  ' "$bundle_file" >/dev/null 2>&1; then
+    | .predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit as $commit
+    | select($commit | IN($accepted[]))
+    | $commit
+  ' "$bundle_file" 2>/dev/null)"; then
     echo "error: attestation provenance does not match the pinned source commit" >&2
     return 1
   fi
 
-  echo "Build attestation cryptographically verified (Sigstore bundle, signer $REPO/$SIGNER_WORKFLOW; provenance for $binary_sha256, source ${ACCEPTED_SOURCE_COMMITS[*]})" >&2
+  echo "Build attestation cryptographically verified (Sigstore bundle, signer $REPO/$SIGNER_WORKFLOW; provenance for $binary_sha256, source $matched_commit)" >&2
   return 0
 }
 
