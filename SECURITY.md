@@ -43,8 +43,25 @@ verification is covered by tests rather than by manual auditing.
 The `setgid input` bit is applied by a single privileged process that copies the
 verified asset into a private root-owned directory, checks the digest of that
 copy and installs from it. Anything running as your user can rewrite the
-download or the build output, but never the bytes that gain the bit, so a
-substituted daemon is rejected before an executable one exists.
+download, but never the bytes that gain the bit, so a substituted daemon is
+rejected before an executable one exists.
+
+That privileged step exists exactly once, and it has one caller. The digest it
+verifies against always comes from version control. It is never read from the
+file being installed: the file sits in a directory you own, so a digest derived
+from it is supplied by the same user who could replace it, and the check would
+approve whatever was there. A locally built daemon has no attestation and no
+provenance tying it to the reviewed source, so there is no value to pin it
+against, and no flag installs one with the bit. This is why there is no
+`--build-install`: it existed, it derived its expected digest from
+`target/release/omakeys-daemon`, and that made the verification circular. The
+route for developers is `--build` (no root) plus `--add-input-group`, which runs
+only `usermod` and costs one re-login instead.
+
+`--add-input-group` is the offline fallback when the release cannot be fetched.
+It grants the same `/dev/input` access by group membership rather than by a file
+bit. Group membership reaches only new sessions, which is the trade for a path
+that asks root to run no code at all.
 
 To re-check an already downloaded asset by hand, follow
 `verify_attestation()` in `bin/omarchy-install-omakeys`. `gh attestation

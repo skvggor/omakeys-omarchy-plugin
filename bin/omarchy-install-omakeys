@@ -64,13 +64,13 @@ cleanup() {
 trap cleanup EXIT
 
 usage() {
-  echo "Usage: $(basename "$0") [--check|--build|--build-install|--install|--uninstall|--usermod]" >&2
+  echo "Usage: $(basename "$0") [--check|--build|--install|--uninstall|--usermod|--add-input-group]" >&2
   echo "  --check          Report daemon readiness and setgid status" >&2
-  echo "  --build          Compile the daemon locally with cargo (developers only, no sudo)" >&2
-  echo "  --build-install  Compile locally and setgid it to group 'input' (developers, sudo)" >&2
+  echo "  --build          Compile the daemon locally with cargo (developers only, no sudo, no setgid)" >&2
   echo "  --install        Verify and download the daemon from the latest GitHub release, then setgid it (sudo, no Rust needed)" >&2
   echo "  --uninstall      Remove the setgid daemon binary (sudo)" >&2
   echo "  --usermod        Install from release and add the current user to the 'input' group (next login)" >&2
+  echo "  --add-input-group  Add the current user to the 'input' group only, without installing (sudo, next login)" >&2
   echo "  -h, --help       Show this help" >&2
   echo "Environment:" >&2
   echo "  OMAKEYS_VERSION  Release tag to download, e.g. v1.0.0 (default: reads manifest.json)" >&2
@@ -311,9 +311,9 @@ fetch_release() {
 
   if ! verify_attestation "$binary_sha256"; then
     fail "attestation verification failed for $HELPER_ASSET $version; refusing to install it.
-  Check your network (the GitHub API rate-limits unauthenticated requests),
-  install openssl when missing (omarchy pkg add openssl), or build from
-  source with --build-install"
+  Check your network (the GitHub API rate-limits unauthenticated requests) and
+  install openssl when missing (omarchy pkg add openssl). Offline? See
+  --add-input-group in --help for a sudo path that runs no downloaded code."
   fi
 
   install_verified_daemon "$asset_dir/$HELPER_ASSET" "$binary_sha256" \
@@ -321,7 +321,15 @@ fetch_release() {
   echo "OmaKeys daemon $version installed and setgid configured at $DAEMON"
 }
 
-# Privileged install that only ever installs the bytes root itself verified.
+# The one and only privileged step that can produce a setgid input binary.
+#
+# Its caller must pass the digest pinned in version control, never a digest read
+# from the file being installed: an expected value derived from the source is
+# supplied by the same user who can replace the source, so it approves whatever
+# that user put there and the check below becomes a tautology. That is why no
+# locally built daemon reaches this function — a build has no provenance to bind
+# it to the reviewed source, and this script has no other way to say which bytes
+# it meant.
 #
 # The source file sits in a user-writable directory and the caller runs as that
 # user, so any check performed outside the privileged step is advisory: between
@@ -374,7 +382,6 @@ fi
 }
 
 build_daemon() {
-  local mode="${1:-}"
   if ! command -v cargo >/dev/null 2>&1; then
     fail "cargo not found. Install Rust first or use --install for the prebuilt release binary."
   fi
@@ -384,23 +391,21 @@ build_daemon() {
   )
   local built="$PROJECT_DIR/target/release/omakeys-daemon"
 
-  if [[ "$mode" == "setgid" ]]; then
-    # target/release/ is user-writable too, so the built binary gets the same
-    # post-write check as the downloaded asset.
-    local built_sha256
-    built_sha256="$(sha256sum "$built" | cut -d' ' -f1)"
-    install_verified_daemon "$built" "$built_sha256" \
-      || fail "refusing to keep an unverified daemon at $DAEMON"
-    echo "daemon built and installed at $DAEMON (setgid root:input)"
-  else
-    cp "$built" "$DAEMON"
-    # Explicit mode, not `chmod +x`: the copy inherits the caller's umask, so a
-    # permissive one would leave the daemon group-writable.
-    chmod 0755 "$DAEMON"
-    echo "daemon built and installed at $DAEMON (local permissions)"
-  fi
+  # The copy is unlinked first: a daemon left behind by --install is root-owned,
+  # and overwriting it in place would fail even though the directory is ours.
+  # Explicit mode, not `chmod +x`: the copy inherits the caller's umask, so a
+  # permissive one would leave the daemon group-writable.
+  rm -f "$DAEMON"
+  cp "$built" "$DAEMON"
+  chmod 0755 "$DAEMON"
+  echo "daemon built and installed at $DAEMON (local permissions, no setgid)"
+  echo "reading /dev/input still needs the 'input' group: run with --add-input-group and log back in"
 }
 
+# The only way this plugin asks root to grant /dev/input access without touching
+# a single byte of code: usermod runs no downloaded or locally built binary, so
+# there is nothing for a same-user process to substitute. Group membership only
+# reaches new sessions, which is the documented cost of this route.
 add_to_input_group() {
   if id -nG | tr ' ' '\n' | grep -qx "input"; then
     echo "user is already in the input group"
@@ -435,13 +440,13 @@ do_check() {
 case "${1:-}" in
   --check) do_check ;;
   --build) build_daemon ;;
-  --build-install) build_daemon "setgid" ;;
   --install) fetch_release ;;
   --uninstall) uninstall_daemon ;;
   --usermod)
     fetch_release
     add_to_input_group
     ;;
+  --add-input-group) add_to_input_group ;;
   -h | --help) usage ;;
   *) usage ;;
 esac

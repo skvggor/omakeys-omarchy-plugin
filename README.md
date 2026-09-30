@@ -109,10 +109,10 @@ The helper accepts:
 | Flag             | Effect                                                                 |
 | ---------------- | ---------------------------------------------------------------------- |
 | `--check`        | Report whether the daemon exists and setgid is active.                 |
-| `--build`        | Compile the daemon locally with cargo and copy it to `bin/` (devs, no sudo). |
-| `--build-install`| Compile locally and apply `setgid input` (devs, one-time sudo).          |
+| `--build`        | Compile the daemon locally with cargo and copy it to `bin/` (devs, no sudo, no setgid). |
 | `--install`      | Download the latest release binary and apply `setgid input` (no Rust).   |
 | `--usermod`      | Install from release, apply setgid, **and** add the current user to `input` (next login). |
+| `--add-input-group` | Add the current user to `input` only, without installing (next login). |
 | `--uninstall`    | Remove the setgid daemon binary. The plugin stays but stops capturing. |
 | `-h, --help`     | Show usage.                                                            |
 
@@ -121,7 +121,6 @@ not available.
 
 > If the **bar widget shows "BUILD AND GRANT EVDEV ACCESS"**, the daemon could
 > not read the input devices. Re-run `--install` and restart the shell.
-> Offline? Fall back to a local compile with `--build-install`.
 
 ## Updating from a local clone
 
@@ -135,12 +134,32 @@ omarchy plugin remove skvggor.omakeys --yes \
   && omarchy restart shell
 ```
 
-Then rebuild the daemon from the installed clone:
+Then rebuild the daemon from the installed clone. A local build is installed
+without `setgid`, so it needs group membership instead of the file bit:
 
 ```sh
 cd ~/.config/omarchy/plugins/skvggor.omakeys
-./bin/omarchy-install-omakeys --build-install   # compiles locally + reapplies setgid input
+./bin/omarchy-install-omakeys --build            # compiles locally, no sudo
+./bin/omarchy-install-omakeys --add-input-group  # one sudo prompt, no code is run as root
 ```
+
+Log out and back in once for the group membership to take effect, then
+`omarchy restart shell`. There is deliberately no flag that applies `setgid
+input` to a locally built binary: see [Security](SECURITY.md).
+
+## Working without a network
+
+`--install` is the only route that grants `/dev/input` access without a
+re-login, and it needs the network. Offline, the choice is between no capture
+and adding yourself to the `input` group, which costs one re-login:
+
+```sh
+./bin/omarchy-install-omakeys --add-input-group
+```
+
+That flag only ever runs `usermod`: it downloads nothing and runs no locally
+built binary, so there is nothing for another process to substitute. Pair it
+with `--build` to test your own changes against a live daemon.
 
 ## Usage
 
@@ -178,8 +197,9 @@ bin/omakeys-daemon \
    The Rekor log entry is used only to date
   the short-lived certificate; its inclusion proof is not re-checked offline
   (it provides auditability, not authenticity). Any missing proof fails closed
-  before the setgid install; `--build-install` remains the fallback when the
-  network is unavailable. Manual re-check with the GitHub CLI (after
+  before the setgid install. Offline, `--add-input-group` is the remaining
+  route: it runs no downloaded or built code, and costs one re-login. Manual
+  re-check with the GitHub CLI (after
   `gh auth login`):
   `gh attestation verify <asset> --repo skvggor/omakeys-omarchy-plugin --signer-workflow skvggor/omakeys-omarchy-plugin/.github/workflows/release.yml`.
 - **Post-install re-check.** The verified file lives in a user-writable
@@ -188,6 +208,14 @@ bin/omakeys-daemon \
   removes it if it differs from the verified one. The bytes that end up setgid
   `input` are therefore the bytes that were verified, even if another process
   running as the same user substitutes the file mid-install.
+- **One route to `setgid input`, and never from a build.** The digest handed to
+  the privileged step always comes from version control, never from the file
+  being installed. A digest read from a user-writable path would be supplied by
+  the same user who can replace that path, so it would approve whatever is
+  there and the check would prove nothing. `--install` is therefore the only
+  flag that can produce a setgid binary, and a locally built daemon has no
+  provenance tying it to the reviewed source, so no flag can install one with
+  the bit. Developers use `--build` plus `--add-input-group`.
 - **Owner-only state.** The keystroke state file and the single-instance lock
   are written with mode `0600`, and the enable flag directory is created with
   `umask 077`. The file lives at
@@ -222,7 +250,7 @@ cargo clippy --all-targets -- -D warnings
 cargo llvm-cov
 npm test
 ./bin/omarchy-install-omakeys --check
-./bin/omarchy-install-omakeys --build-install
+./bin/omarchy-install-omakeys --build
 qmllint Service.qml Overlay.qml Panel.qml BarWidget.qml
 ```
 

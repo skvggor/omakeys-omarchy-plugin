@@ -609,14 +609,46 @@ test('bin/omarchy-install-omakeys', async (t) => {
     )
   })
 
-  await t.test('drops a locally built daemon that was substituted before the setgid install', { skip: skipReason }, () => {
-    const sandbox = createSandbox({ cargo: true, installSwap: true })
-    const result = sandbox.run(['--build-install'])
+  // The invariant the whole setgid design rests on: the expected digest handed
+  // to the privileged step always comes from version control, never from the
+  // file being installed. A digest read from a user-writable path is supplied by
+  // the same user who can replace that path, so it approves whatever is there.
+  // There is no such path for a locally built daemon any more, which is why the
+  // flag that combined them is gone rather than fixed.
+  await t.test('has no flag that grants setgid to a locally built daemon', { skip: skipReason }, () => {
+    const sandbox = createSandbox({ cargo: true })
 
-    assert.equal(result.status, 1, result.stderr)
-    assert.match(result.stderr, /copy staged for install does not match the verified digest/)
-    assert.equal(fs.existsSync(sandbox.daemon), false, 'substituted daemon must never be installed')
-    assert.doesNotMatch(sandbox.log('install.log'), /-m 2755/)
+    for (const args of [['--build-install'], ['--build-install', 'setgid']]) {
+      const result = sandbox.run(args)
+      assert.equal(result.status, 1, `expected ${args.join(' ')} to be refused`)
+      assert.match(result.stdout + result.stderr, /Usage: omarchy-install-omakeys/)
+    }
+
+    assert.equal(sandbox.log('sudo.log'), null, 'a refused flag must not ask for root')
+    assert.equal(sandbox.log('cargo.log'), null, 'a refused flag must not build anything')
+    assert.equal(sandbox.log('install.log'), null, 'a refused flag must not install anything')
+  })
+
+  await t.test('never asks for root when compiling the daemon locally', { skip: skipReason }, () => {
+    const sandbox = createSandbox({ cargo: true })
+    const result = sandbox.run(['--build'])
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(sandbox.log('sudo.log'), null, '--build must stay root-free')
+    assert.equal(sandbox.log('install.log'), null, '--build must not reach the privileged install')
+    assert.equal(fs.statSync(sandbox.daemon).mode & 0o7777, 0o755, 'a local build must not gain the setgid bit')
+  })
+
+  // target/release/ is user-writable, and so is the destination. A daemon left
+  // behind by --install is root-owned, so --build has to unlink it before
+  // copying rather than try to overwrite it in place.
+  await t.test('replaces a root-owned daemon left by a previous install', { skip: skipReason }, () => {
+    const sandbox = createSandbox({ cargo: true, daemon: 0o2755 })
+    const result = sandbox.run(['--build'])
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(fs.statSync(sandbox.daemon).mode & 0o7777, 0o755)
+    assert.equal(fs.readFileSync(sandbox.daemon, 'utf8'), 'locally built daemon\n')
   })
 
   await t.test('installs setgid from the copy root verified, not from the source path', { skip: skipReason }, () => {
@@ -812,16 +844,9 @@ test('bin/omarchy-install-omakeys', async (t) => {
     assert.equal(sandbox.log('sudo.log'), null)
     assert.equal(fs.statSync(sandbox.daemon).mode & 0o7777, 0o755)
     assert.equal(fs.readFileSync(sandbox.daemon, 'utf8'), 'locally built daemon\n')
+    assert.match(result.stdout, /--add-input-group/, 'a local build must point at the one remaining route to /dev/input')
   })
 
-  await t.test('builds and installs the daemon setgid', { skip: skipReason }, () => {
-    const sandbox = createSandbox({ cargo: true })
-    const result = sandbox.run(['--build-install'])
-
-    assert.equal(result.status, 0, result.stderr)
-    assert.match(sandbox.log('install.log'), /-m 2755 .* input/)
-    assert.equal(fs.statSync(sandbox.daemon).mode & 0o7777, 0o2755)
-  })
 
   await t.test('refuses to build without cargo', { skip: skipReason }, () => {
     const sandbox = createSandbox({ cargo: false })
@@ -877,6 +902,31 @@ test('bin/omarchy-install-omakeys', async (t) => {
     const already = member.run(['--usermod'])
     assert.equal(already.status, 0, already.stderr)
     assert.match(already.stdout, /already in the input group/)
+  })
+
+  // The offline route for developers, and the reason it is safe: usermod is the
+  // only privileged command on it, and it runs no downloaded or locally built
+  // binary, so there is nothing a same-user process could substitute. The cost is
+  // that group membership only reaches new sessions.
+  await t.test('adds the user to the input group without installing anything', { skip: skipReason }, () => {
+    const sandbox = createSandbox()
+    const result = sandbox.run(['--add-input-group'])
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /only active after the next login/)
+    assert.match(sandbox.log('usermod.log'), /-aG input tester/)
+    assert.equal(sandbox.log('install.log'), null, 'no byte of code may be installed on this route')
+    assert.equal(sandbox.log('curl.log'), null, 'this route must not need the network')
+    assert.equal(fs.existsSync(sandbox.daemon), false)
+  })
+
+  await t.test('reports existing input group membership without asking for root', { skip: skipReason }, () => {
+    const sandbox = createSandbox({ groups: 'sys input video' })
+    const result = sandbox.run(['--add-input-group'])
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /already in the input group/)
+    assert.equal(sandbox.log('usermod.log'), null)
   })
 
   await t.test('prints usage for unknown or missing flags', { skip: skipReason }, () => {
