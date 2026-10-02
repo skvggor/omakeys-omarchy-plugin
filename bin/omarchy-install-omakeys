@@ -27,12 +27,17 @@ HELPER_ASSET="omakeys-daemon-x86_64-linux-gnu"
 #   e252db81  the source commit reviewed by the marketplace maintainer
 #   3f714a1   the commit the published v1.0.0 asset was actually built from
 #   2638642   the commit the published v1.0.1 asset was actually built from
-# src/ is byte-identical across the first two (e252db81 only touched QML and
-# docs), and 2638642 differs from them only by rustfmt and a diagnostic message,
-# so all three resolve to the same daemon, and provenance is unforgeable, so no
-# entry can be quietly repointed at different code.
-# The version-controlled digest pins a single asset, so only the v1.0.1 entry
-# is reachable: the two older ones are kept as the record of what was reviewed
+#   3faea09   the commit the published v1.0.2 asset was actually built from
+# The first three resolve to the same daemon: src/ is byte-identical across
+# e252db81 and 3f714a1 (e252db81 only touched QML and docs), and 2638642 differs
+# from them only by rustfmt and a diagnostic message. 3faea09 is a genuinely
+# different daemon: it resolves hyprctl by absolute path instead of PATH, so src/
+# there is not the older code and that entry must not be read as interchangeable
+# with the others. What makes each entry safe is that provenance is unforgeable,
+# so an entry cannot be quietly repointed at different code, and that the digest
+# pin below decides which asset is actually installable.
+# The version-controlled digest pins a single asset, so only the v1.0.2 entry
+# is reachable: the three older ones are kept as the record of what was reviewed
 # and published, not as installable targets. All entries are enforced, not just
 # the first two — verify_attestation() matches against this whole array, and a
 # test asserts that every entry is accepted, so an entry cannot be recorded here
@@ -41,7 +46,7 @@ HELPER_ASSET="omakeys-daemon-x86_64-linux-gnu"
 # commit and a tree cannot contain its own SHA, so the release commit is added
 # here in the next commit, together with the new pinned digest:
 #   sha256sum omakeys-daemon-x86_64-linux-gnu > bin/omakeys-daemon-x86_64-linux-gnu.sha256
-ACCEPTED_SOURCE_COMMITS=("e252db81ff26b7f58376897369e2f62306838258" "3f714a18085b6a71e892328c0a6923899a8f9028" "2638642531d9e0c6d65a9e586ce9c7a6515cfc01")
+ACCEPTED_SOURCE_COMMITS=("e252db81ff26b7f58376897369e2f62306838258" "3f714a18085b6a71e892328c0a6923899a8f9028" "2638642531d9e0c6d65a9e586ce9c7a6515cfc01" "3faea0918981e6ac9e67e93973b6472f6c094ca0")
 # Pinned digest of the release asset, in version control.
 PINNED_SHA256_FILE="$PROJECT_DIR/bin/omakeys-daemon-x86_64-linux-gnu.sha256"
 # Pinned Sigstore Fulcio CA chain: the trust anchor for the attestation certificate.

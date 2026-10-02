@@ -94,7 +94,10 @@ jobs:
 
           digest="sha256:$(sha256sum "$staged" | cut -d' ' -f1)"
           attestation_file="$(mktemp)"
-          bundle_file="$(mktemp)"
+          # gh attestation verify --bundle dispatches on the file extension and
+          # rejects anything that is not .json or .jsonl, so a bare mktemp path
+          # fails the job after the release is already published.
+          bundle_file="$(mktemp --suffix=.json)"
           trap 'rm -f "$attestation_file" "$bundle_file"' EXIT
 
           ATTEST_CURL_OPTS=(--fail --location --retry 5 --retry-delay 2

@@ -12,7 +12,7 @@ const PROJECT_ROOT = path.join(__dirname, '..')
 const SCRIPT_PATH = path.join(PROJECT_ROOT, 'bin', 'omarchy-install-omakeys')
 const CHAIN_PATH = path.join(PROJECT_ROOT, 'bin', 'sigstore-fulcio-chain.pem')
 const PIN_PATH = path.join(PROJECT_ROOT, 'bin', 'omakeys-daemon-x86_64-linux-gnu.sha256')
-const FIXTURE_PATH = path.join(__dirname, 'fixtures', 'v1.0.1-attestation-bundle.json')
+const FIXTURE_PATH = path.join(__dirname, 'fixtures', 'v1.0.2-attestation-bundle.json')
 const SCRIPT_SOURCE = fs.readFileSync(SCRIPT_PATH, 'utf8')
 
 const REPO = SCRIPT_SOURCE.match(/^REPO="([^"]+)"$/m)[1]
