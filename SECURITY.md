@@ -17,6 +17,43 @@ as sensitive by default:
   user with a single `setgid input` bit so it can read input devices without a
   re-login.
 
+## The daemon holds a group across its whole life
+
+The setgid bit applies at `exec`, and the daemon needs the group continuously:
+`DeviceRegistry::rescan()` reopens `/dev/input` every two seconds, so it cannot
+give the group up after startup. That makes "just drop the privileges" not an
+option, and it is why the child processes it does spawn are worth a section of
+their own.
+
+What does **not** happen, contrary to a reasonable reading: the `input` group is
+not inherited by the programs the daemon spawns. Per `execve(2)`, when the file
+being executed has no set-group-ID bit the effective IDs come from the real IDs.
+Measured on this machine with the installed `root:input` 2755 daemon:
+
+```
+daemon  Gid: 1000 993 993 993     real 1000, effective 993 = input
+child   Gid: 1000 1000 1000 1000   real 1000, effective 1000
+```
+
+So the daemon spawning `hyprctl` does not hand `input` to it. The supplementary
+groups *are* inherited across `exec`, but those are the caller's own, and an
+unprivileged process cannot drop them regardless: `setgroups(0, NULL)` returns
+`EPERM` without `CAP_SETGID`, and the daemon is not root. A `pre_exec` hook that
+tried would fail the spawn and cost the layout detection while removing nothing.
+
+## The one program the daemon runs
+
+`src/layout.rs` runs `hyprctl` to read the active keyboard layout. It is the only
+external program the daemon executes, and it is resolved by absolute path from a
+fixed list (`/usr/bin/hyprctl`, `/bin/hyprctl`, `/usr/local/bin/hyprctl`).
+
+`PATH` is not consulted, and there is no environment override. A candidate is
+accepted only when it is a regular file, owned by uid 0, not writable by group or
+other, and executable by its owner. When nothing qualifies the daemon falls back
+to the built-in default layout instead of running an unverified binary. Each of
+those conditions is covered by a test in `layout.rs`, and the tests were checked
+to fail if any one of them is relaxed.
+
 ## Reporting a vulnerability
 
 Please report security issues privately through GitHub's "Report a

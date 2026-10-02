@@ -74,7 +74,10 @@ and it never runs as root.
   No GitHub account, `gh` or Sigstore client is needed: verification runs
   locally against the downloaded bundle.
 - `libxkbcommon` at runtime (usually already present).
-- `hyprctl` reachable on `PATH` (used to discover the active keyboard layout).
+- `hyprctl` installed at `/usr/bin/hyprctl`, `/bin/hyprctl` or
+  `/usr/local/bin/hyprctl` (used to discover the active keyboard layout). It is
+  looked up by absolute path, not through `PATH`, and only when root owns it and
+  nobody else can write it.
 - Rust toolchain is **not** required for installation; it is only needed for
   developers who build the daemon locally.
 

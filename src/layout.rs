@@ -202,7 +202,7 @@ fn fetch_layout_from_hyprctl() -> (String, String, String) {
 }
 
 fn hyprctl_str(option: &str) -> Option<String> {
-    let output = std::process::Command::new("hyprctl")
+    let output = std::process::Command::new(trusted_hyprctl()?)
         .args(["getoption", option, "-j"])
         .stderr(std::process::Stdio::null())
         .output()
@@ -215,9 +215,255 @@ fn hyprctl_str(option: &str) -> Option<String> {
     Some(value.to_string())
 }
 
+/// Absolute locations we accept hyprctl from, in order of preference.
+///
+/// PATH is deliberately not consulted. It belongs to the caller, and the daemon
+/// runs with a group it does not get from its own account, so naming a binary
+/// the caller chooses is the wrong shape for this process. Nothing needs to be
+/// configurable here: the candidate list is fixed, and if none of them qualifies
+/// the caller falls back to the default layout instead of spawning anything.
+const HYPRCTL_CANDIDATES: [&str; 3] = ["/usr/bin/hyprctl", "/bin/hyprctl", "/usr/local/bin/hyprctl"];
+
+/// Resolve hyprctl from a fixed list of absolute paths, accepting a candidate
+/// only when root owns it and no one else can write it.
+///
+/// An environment override is not accepted either. The daemon's privileges must
+/// not be redirectable by the environment it inherited.
+fn trusted_hyprctl() -> Option<std::path::PathBuf> {
+    trusted_hyprctl_from(&HYPRCTL_CANDIDATES)
+}
+
+fn trusted_hyprctl_from(candidates: &[&str]) -> Option<std::path::PathBuf> {
+    candidates
+        .iter()
+        .map(std::path::Path::new)
+        .find(|candidate| is_root_owned_executable(candidate))
+        .map(std::path::Path::to_path_buf)
+}
+
+fn is_root_owned_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    is_root_owned(&metadata) && mode_is_trusted(metadata.permissions().mode())
+}
+
+/// Split from the mode check so each condition is testable on its own. A test
+/// that only exercised the pair could not tell which half rejected a file: a
+/// temporary file is never root-owned, so the ownership test would mask a
+/// regression in the permission test on every case.
+fn is_root_owned(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    metadata.uid() == 0
+}
+
+    fn mode_is_trusted(mode: u32) -> bool {
+        // Group or world writable would let a local user replace the binary.
+        if mode & 0o022 != 0 {
+            return false;
+        }
+        mode & 0o100 != 0
+    }
+
+
+// Note what this module deliberately does not do: it does not try to drop group
+// `input` before spawning hyprctl. That was measured, not assumed.
+//
+// A process that gets a group from a set-group-ID bit does not pass it on. Per
+// execve(2), when the file being executed has no set-group-ID bit the effective
+// IDs are taken from the real IDs, so the effective group `input` the daemon
+// holds is not inherited by hyprctl. Observed on this machine with the installed
+// daemon running as root:input 2755:
+//
+//   daemon  Gid: 1000 993 993 993          (real 1000, effective 993 = input)
+//   child   Gid: 1000 1000 1000 1000        (real 1000, effective 1000)
+//
+// The supplementary groups *are* inherited, but they are the caller's own, and
+// an unprivileged process cannot drop them anyway: setgroups(0, NULL) returns
+// EPERM without CAP_SETGID, and the daemon is not root. Attempting it in a
+// pre_exec hook would therefore fail the spawn outright and cost the layout
+// detection, in exchange for removing nothing.
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn set_mode(path: &std::path::Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(path, PermissionsExt::from_mode(mode)).unwrap();
+    }
+
+    fn temp_candidate(directory: &std::path::Path, name: &str, mode: u32) -> std::path::PathBuf {
+        let path = directory.join(name);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        set_mode(&path, mode);
+        path
+    }
+
+
+    // The daemon is setgid input, so a child it spawns inherits group input and
+    // can read every keyboard on the machine. These cover the trust check that
+    // decides which binary is allowed to be spawned at all.
+
+    // Each half of the trust check on its own. A temporary file is never
+    // root-owned, so the end-to-end cases below cannot reach the permission
+    // test: without these, dropping the group-write check would change nothing
+    // observable.
+
+    #[test]
+    fn trusts_only_a_mode_nobody_else_can_write() {
+        assert!(mode_is_trusted(0o755));
+        assert!(mode_is_trusted(0o500));
+        assert!(mode_is_trusted(0o111));
+
+        assert!(!mode_is_trusted(0o775), "group writable is not trusted");
+        assert!(!mode_is_trusted(0o757), "world writable is not trusted");
+        assert!(!mode_is_trusted(0o777), "group and world writable is not trusted");
+        assert!(!mode_is_trusted(0o666), "writable without execute is not trusted");
+        assert!(!mode_is_trusted(0o644), "readable but not executable is not trusted");
+        assert!(!mode_is_trusted(0o000));
+    }
+
+    #[test]
+    fn trusts_only_a_file_owned_by_root() {
+        use std::os::unix::fs::MetadataExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let owned_by_us = temp_candidate(directory.path(), "hyprctl", 0o755);
+        let metadata = std::fs::metadata(&owned_by_us).unwrap();
+
+        // The suite never runs as root, so this asserts the negative and leaves
+        // the positive to the end-to-end case below.
+        assert_eq!(is_root_owned(&metadata), metadata.uid() == 0);
+        if unsafe { libc::geteuid() } == 0 {
+            assert!(is_root_owned(&metadata));
+        }
+    }
+
+    #[test]
+    fn rejects_a_candidate_that_is_not_owned_by_root() {
+        let directory = tempfile::tempdir().unwrap();
+        let candidate = temp_candidate(directory.path(), "hyprctl", 0o755);
+
+        assert_eq!(trusted_hyprctl_from(&[candidate.to_str().unwrap()]), None);
+    }
+
+    #[test]
+    fn rejects_a_group_writable_candidate() {
+        let directory = tempfile::tempdir().unwrap();
+        let candidate = temp_candidate(directory.path(), "hyprctl", 0o775);
+
+        assert_eq!(trusted_hyprctl_from(&[candidate.to_str().unwrap()]), None);
+    }
+
+    #[test]
+    fn rejects_a_world_writable_candidate() {
+        let directory = tempfile::tempdir().unwrap();
+        let candidate = temp_candidate(directory.path(), "hyprctl", 0o757);
+
+        assert_eq!(trusted_hyprctl_from(&[candidate.to_str().unwrap()]), None);
+    }
+
+    #[test]
+    fn rejects_a_candidate_without_the_owner_execute_bit() {
+        let directory = tempfile::tempdir().unwrap();
+        let candidate = temp_candidate(directory.path(), "hyprctl", 0o644);
+
+        assert_eq!(trusted_hyprctl_from(&[candidate.to_str().unwrap()]), None);
+    }
+
+    #[test]
+    fn rejects_a_directory_and_a_missing_path() {
+        let directory = tempfile::tempdir().unwrap();
+
+        assert_eq!(
+            trusted_hyprctl_from(&[directory.path().to_str().unwrap()]),
+            None
+        );
+        assert_eq!(
+            trusted_hyprctl_from(&[directory.path().join("absent").to_str().unwrap()]),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_every_candidate_when_none_of_them_is_trusted() {
+        let directory = tempfile::tempdir().unwrap();
+        let group_writable = temp_candidate(directory.path(), "a", 0o775);
+        let world_writable = temp_candidate(directory.path(), "b", 0o757);
+
+        assert_eq!(
+            trusted_hyprctl_from(&[group_writable.to_str().unwrap(), world_writable.to_str().unwrap()]),
+            None
+        );
+    }
+
+    // Only assertable where a root-owned hyprctl actually exists, which is the
+    // case on the machine this plugin targets and not on a CI runner.
+    #[test]
+    fn accepts_a_root_owned_executable_when_one_is_installed() {
+        let system = std::path::Path::new("/usr/bin/hyprctl");
+        if !system.exists() {
+            eprintln!("skipped: no root-owned hyprctl on this machine");
+            return;
+        }
+
+        assert_eq!(trusted_hyprctl(), Some(system.to_path_buf()));
+    }
+
+    #[test]
+    fn never_resolves_hyprctl_from_path() {
+        use std::sync::{Mutex, MutexGuard, OnceLock};
+
+        // The tests in this binary run on parallel threads and env is process
+        // wide, so the two env-reading assertions take this lock.
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard: MutexGuard<()> = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("executed");
+        let fake = directory.path().join("hyprctl");
+        // A redirection, not touch(1): PATH points at this directory alone, so
+        // any external command here would fail to resolve and the marker would
+        // never appear for the wrong reason.
+        std::fs::write(&fake, format!("#!/bin/sh\n: > '{}'\n", marker.display())).unwrap();
+        set_mode(&fake, 0o755);
+
+
+        let original = std::env::var_os("PATH");
+        std::env::set_var("PATH", directory.path());
+
+        let resolved = trusted_hyprctl();
+        let _ = hyprctl_str("input:kb_layout");
+
+        match original {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+
+        assert!(
+            !marker.exists(),
+            "hyprctl was resolved through PATH: {:?}",
+            marker
+        );
+        // Whatever was resolved, it can only be one of the fixed absolute paths.
+        if let Some(path) = resolved {
+            assert!(
+                HYPRCTL_CANDIDATES.contains(&path.to_str().unwrap_or_default()),
+                "resolved outside the candidate list: {path:?}"
+            );
+        }
+    }
 
     fn map_basic() -> XkbMap {
         XkbMap::build("us".to_string(), String::new(), String::new())

@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "omakeys-daemon"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "evdev",
  "libc",
